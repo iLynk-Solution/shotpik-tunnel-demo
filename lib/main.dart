@@ -7,8 +7,29 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+import 'package:system_tray/system_tray.dart';
+import 'package:window_manager/window_manager.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await windowManager.ensureInitialized();
+
+  windowManager.waitUntilReadyToShow(
+    const WindowOptions(
+      size: Size(900, 700),
+      center: true,
+      title: "Shotpik Agent",
+      skipTaskbar: true,
+    ),
+    () async {
+      await windowManager.show();
+      await windowManager.focus();
+      await windowManager.setPreventClose(
+        true,
+      ); // QUAN TRỌNG: Ngăn chặn thoát App khi bấm X
+    },
+  );
+
   runApp(const TunnelInternalApp());
 }
 
@@ -31,7 +52,11 @@ class TunnelHome extends StatefulWidget {
   State<TunnelHome> createState() => _TunnelHomeState();
 }
 
-class _TunnelHomeState extends State<TunnelHome> {
+class _TunnelHomeState extends State<TunnelHome> with WindowListener {
+  final SystemTray _systemTray = SystemTray();
+  final AppWindow _appWindow = AppWindow();
+  final Menu _menu = Menu();
+
   HttpServer? _server;
   Process? _tunnelProcess;
   StreamSubscription? _tunnelOutSub;
@@ -62,6 +87,63 @@ class _TunnelHomeState extends State<TunnelHome> {
 
   final List<String> _logs = [];
   final ScrollController _scroll = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    windowManager.addListener(this);
+    initSystemTray();
+  }
+
+  Future<void> initSystemTray() async {
+    String iconPath = Platform.isWindows
+        ? 'assets/app_icon.ico'
+        : 'assets/shotpik-agent.png';
+
+    await _systemTray.initSystemTray(iconPath: iconPath);
+
+    await _updateTrayMenu();
+
+    _systemTray.registerSystemTrayEventHandler((eventName) {
+      if (eventName == kSystemTrayEventClick) {
+        _appWindow.show();
+      } else if (eventName == kSystemTrayEventRightClick) {
+        _systemTray.popUpContextMenu();
+      }
+    });
+  }
+
+  Future<void> _updateTrayMenu() async {
+    await _menu.buildFrom([
+      MenuItemLabel(
+        label: _isRunning ? 'Status: ONLINE' : 'Status: OFFLINE',
+        enabled: false,
+      ),
+      MenuSeparator(),
+      MenuItemLabel(
+        label: _isRunning ? 'Stop Tunnel' : 'Start Tunnel',
+        onClicked: (menuItem) => _handleTunnelToggle(),
+      ),
+      MenuItemLabel(
+        label: 'Show Window',
+        onClicked: (menuItem) => windowManager.show(),
+      ),
+      MenuSeparator(),
+      MenuItemLabel(label: 'Exit', onClicked: (menuItem) => _exitApp()),
+    ]);
+    await _systemTray.setContextMenu(_menu);
+  }
+
+  Future<void> _exitApp() async {
+    await _stopEverything();
+    exit(0);
+  }
+
+  @override
+  void onWindowClose() async {
+    // Khi bấm nút X, chỉ ẩn cửa sổ chứ không thoát
+    await windowManager.hide();
+  }
 
   void log(String message) {
     if (!kDebugMode) return;
@@ -496,6 +578,7 @@ class _TunnelHomeState extends State<TunnelHome> {
         _error = null;
         _statusMessage = null;
       });
+      _updateTrayMenu();
     }
   }
 
@@ -529,6 +612,7 @@ class _TunnelHomeState extends State<TunnelHome> {
         _tunnelUrl = null;
         if (clearFolders) _sharedFolders.clear();
       });
+      _updateTrayMenu(); // Cập nhật trạng thái trên khay hệ thống
     }
   }
 
@@ -548,6 +632,7 @@ class _TunnelHomeState extends State<TunnelHome> {
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
     _stopEverything();
     _scroll.dispose();
     super.dispose();
