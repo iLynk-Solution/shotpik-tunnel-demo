@@ -57,7 +57,7 @@ class _TunnelHomeState extends State<TunnelHome> {
   static const int _namedTunnelPort = 8080;
 
   // Thông tin bảo mật (Bearer Token)
-  static const String _apiToken = 'shotpik_secret_token_2026';
+  static const String _apiToken = _tunnelToken;
   // ─────────────────────────────────────────────────────────────────────
 
   final List<String> _logs = [];
