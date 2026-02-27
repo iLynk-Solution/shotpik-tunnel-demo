@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
@@ -54,6 +55,9 @@ class _TunnelHomeState extends State<TunnelHome> {
       'eyJhIjoiOTYwZDRlYmMyOTBlMzY5M2IyOGNlYjk1MTY0NWIwZmYiLCJ0IjoiODlkZjkwNTQtNjVmNy00Y2Y0LThjODAtNjEyMDQ2YjZmYmFiIiwicyI6Ik16a3hZVGRrWkRrdE5XRTRZUzAwWlRObUxUazRPR1V0WldKbE9HRm1NamxpWVRkaCJ9';
   static const String _tunnelDomain = 'https://shotpik-tunnel.tuyendev.store';
   static const int _namedTunnelPort = 8080;
+
+  // Thông tin bảo mật (Bearer Token)
+  static const String _apiToken = 'shotpik_secret_token_2026';
   // ─────────────────────────────────────────────────────────────────────
 
   final List<String> _logs = [];
@@ -80,6 +84,39 @@ class _TunnelHomeState extends State<TunnelHome> {
 
     _server!.listen((HttpRequest request) async {
       try {
+        // 1. Kiểm tra xác thực (Bearer Token hoặc URL Token)
+        final authHeader = request.headers.value(
+          HttpHeaders.authorizationHeader,
+        );
+        final urlToken = request.uri.queryParameters['token'];
+
+        bool isAuthorized = false;
+
+        // Kiểm tra qua Header: Authorization: Bearer <token>
+        if (authHeader != null && authHeader.startsWith('Bearer ')) {
+          if (authHeader.substring(7) == _apiToken) isAuthorized = true;
+        }
+
+        // Kiểm tra qua URL: ?token=<token>
+        if (urlToken == _apiToken) isAuthorized = true;
+
+        if (!isAuthorized) {
+          request.response.statusCode = HttpStatus.forbidden;
+          final isJson =
+              request.headers.value('accept')?.contains('application/json') ??
+              false;
+          if (isJson) {
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(
+              jsonEncode({"error": "Forbidden: Invalid Token"}),
+            );
+          } else {
+            request.response.write('403 Forbidden: Token không hợp lệ.');
+          }
+          await request.response.close();
+          return;
+        }
+
         final requestPath = Uri.decodeComponent(request.uri.path);
         log(
           "--> [${request.connectionInfo?.remoteAddress.address}] ${request.method} $requestPath",
@@ -98,9 +135,19 @@ class _TunnelHomeState extends State<TunnelHome> {
         }
 
         final virtualName = pathSegments[0];
+
+        // Hỗ trợ REST API (Trả về JSON nếu yêu cầu)
+        final isApiRequest =
+            request.headers.value('accept')?.contains('application/json') ??
+            false;
+
         if (!_sharedFolders.containsKey(virtualName)) {
           request.response.statusCode = HttpStatus.notFound;
-          request.response.write('404 Not Found: Folder not shared.');
+          if (isApiRequest) {
+            request.response.write('{"error": "Folder not shared"}');
+          } else {
+            request.response.write('404 Not Found: Folder not shared.');
+          }
           return;
         }
 
@@ -158,7 +205,33 @@ class _TunnelHomeState extends State<TunnelHome> {
   ) async {
     final relPathInFolder = p.joinAll(segments.sublist(1));
     final fullPath = p.join(localBasePath, relPathInFolder);
-    final entities = await Directory(fullPath).list().toList();
+    final entities = (await Directory(fullPath).list().toList())
+        .where((e) => !p.basename(e.path).startsWith('.'))
+        .toList();
+
+    // Hỗ trợ REST API chuẩn hóa
+    final isApiRequest =
+        request.headers.value('accept')?.contains('application/json') ?? false;
+    if (isApiRequest) {
+      final jsonList = entities.map((e) {
+        final name = p.basename(e.path);
+        final isDir = e is Directory;
+        final pathPrefix = request.uri.path.endsWith('/') ? '' : '/';
+        final publicUrl =
+            "$_tunnelDomain${request.uri.path}$pathPrefix${Uri.encodeComponent(name)}${isDir ? '/' : ''}";
+        return {
+          "name": name,
+          "isDir": isDir,
+          "size": e is File ? e.lengthSync() : 0,
+          "ext": p.extension(e.path).replaceAll('.', ''),
+          "url": publicUrl,
+        };
+      }).toList();
+
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(jsonEncode(jsonList)); // Trả về JSON chuẩn
+      return;
+    }
 
     entities.sort((a, b) {
       if (a is Directory && b is File) return -1;
@@ -167,38 +240,118 @@ class _TunnelHomeState extends State<TunnelHome> {
     });
 
     final buffer = StringBuffer();
-    buffer.write('<!DOCTYPE html><html><head><meta charset="utf-8">');
+    buffer.write('<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8">');
     buffer.write(
       '<meta name="viewport" content="width=device-width, initial-scale=1">',
     );
-    buffer.write('<title>$virtualName</title>');
-    buffer.write(_getSharedStyles());
-    buffer.write('</head><body><div class="container">');
-    buffer.write('<h1>/$virtualName/$relPathInFolder</h1>');
+    buffer.write('<title>Gallery - $virtualName</title>');
     buffer.write(
-      '<ul><li><a href=".." style="background:#f1f5f9;">↩️ Back</a></li>',
+      '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">',
     );
+    buffer.write(_getSharedStyles());
+    buffer.write('</head><body>');
+    buffer.write('<div class="header">');
+    buffer.write('  <div class="breadcrumb">');
+    buffer.write(
+      '    <a href="..">📁 Thư mục gốc</a> <span>/ $virtualName / $relPathInFolder</span>',
+    );
+    buffer.write('  </div>');
+    buffer.write('  <h1>Bộ sưu tập Media</h1>');
+    buffer.write('</div>');
+
+    // Nút BACK nằm ngoài Grid
+    if (relPathInFolder.isNotEmpty) {
+      buffer.write('<div class="back-navigation">');
+      buffer.write('  <a href=".." class="btn-back">');
+      buffer.write('    <span class="btn-icon">↩️</span>');
+      buffer.write('    <span class="btn-text">Quay lại thư mục cha</span>');
+      buffer.write('  </a>');
+      buffer.write('</div>');
+    }
+
+    buffer.write('<div class="gallery-grid">');
+
     for (final entity in entities) {
       final name = p.basename(entity.path);
       final isDir = entity is Directory;
+      final ext = p.extension(entity.path).toLowerCase();
       final urlName = Uri.encodeComponent(name) + (isDir ? '/' : '');
+
+      bool isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp'].contains(ext);
+      bool isVideo = ['.mp4', '.mov', '.avi', '.mkv'].contains(ext);
+
       buffer.write(
-        '<li class="${isDir ? 'dir' : 'file'}"><a href="$urlName">$name${isDir ? '/' : ''}</a></li>',
+        '<a href="$urlName" class="card ${isDir ? 'dir-card' : ''}">',
       );
+
+      if (isImage) {
+        buffer.write(
+          '  <div class="media-preview" style="background-image: url(\'$urlName\')"></div>',
+        );
+      } else if (isVideo) {
+        buffer.write('  <div class="media-preview video-overlay">📽️</div>');
+      } else if (isDir) {
+        buffer.write('  <div class="media-preview dir-preview">📂</div>');
+      } else {
+        buffer.write('  <div class="media-preview file-preview">📄</div>');
+      }
+
+      buffer.write('  <div class="info">');
+      buffer.write('    <div class="name">$name</div>');
+      if (!isDir) {
+        final size = (entity as File).lengthSync();
+        buffer.write(
+          '    <div class="size">${(size / 1024).toStringAsFixed(1)} KB</div>',
+        );
+      }
+      buffer.write('  </div>');
+      buffer.write('</a>');
     }
-    buffer.write('</ul></div></body></html>');
+
+    buffer.write('</div>');
+    buffer.write('<div class="footer">Cung cấp bởi Shotpik Tunnel Demo</div>');
+    buffer.write('</body></html>');
+
     request.response.headers.contentType = ContentType.html;
     request.response.write(buffer.toString());
   }
 
   String _getSharedStyles() {
     return '''<style>
-      body{font-family: sans-serif; padding:20px; background: #f6f7f9;}
-      .container{max-width:800px; margin:0 auto; background:#fff; padding:30px; border-radius:15px; box-shadow:0 5px 15px rgba(0,0,0,0.05);}
-      ul{list-style:none; padding:0;}
-      a{display:block; padding:10px; text-decoration:none; color:#333; border-bottom:1px solid #eee;}
-      a:hover{background:#f9f9f9;}
-      .dir::before{content:"📁 ";} .file::before{content:"📄 ";}
+      :root { --primary: #6366f1; --bg: #f8fafc; --card: #ffffff; }
+      body { font-family: 'Inter', sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #1e293b; }
+      .header { max-width: 1200px; margin: 0 auto 30px; }
+      .breadcrumb { font-size: 14px; color: #64748b; margin-bottom: 8px; }
+      .breadcrumb a { color: var(--primary); text-decoration: none; }
+      h1 { margin: 0; font-size: 28px; font-weight: 600; }
+      
+      .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; max-width: 1200px; margin: 0 auto; }
+      
+      .back-navigation { max-width: 1200px; margin: 0 auto 20px; }
+      .btn-back { display: inline-flex; align-items: center; padding: 10px 24px; background: #fff; border: 1px solid #e2e8f0; 
+                  border-radius: 14px; text-decoration: none; color: #475569; font-weight: 600; font-size: 14px; 
+                  transition: all 0.2s; gap: 10px; }
+      .btn-back:hover { background: #f1f5f9; border-color: var(--primary); color: var(--primary); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+      .btn-icon { font-size: 18px; }
+
+      .card { background: var(--card); border-radius: 16px; overflow: hidden; text-decoration: none; color: inherit; 
+              transition: transform 0.2s, box-shadow 0.2s; border: 1px solid #e2e8f0; display: flex; flex-direction: column; }
+      .card:hover { transform: translateY(-4px); box-shadow: 0 12px 20px -5px rgba(0,0,0,0.1); border-color: var(--primary); }
+      
+      .media-preview { height: 180px; background-size: cover; background-position: center; background-color: #f1f5f9; 
+                       display: flex; align-items: center; justify-content: center; font-size: 50px; }
+      .back-preview { background: #e2e8f0; color: #475569; }
+      .video-overlay { position: relative; color: #fff; background: #1e293b; }
+      .dir-preview { color: #f59e0b; background: #fffbeb; }
+      .file-preview { color: #94a3b8; }
+      
+      .info { padding: 12px; }
+      .name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .size { font-size: 12px; color: #64748b; margin-top: 4px; }
+      
+      .footer { text-align: center; margin-top: 50px; color: #94a3b8; font-size: 13px; }
+      
+      @media (max-width: 600px) { .gallery-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; } }
     </style>''';
   }
 
@@ -566,7 +719,7 @@ class _TunnelHomeState extends State<TunnelHome> {
                             : ListView(
                                 children: _sharedFolders.entries.map((e) {
                                   final folderUrl =
-                                      "$_tunnelUrl/${Uri.encodeComponent(e.key)}/";
+                                      "$_tunnelUrl/${Uri.encodeComponent(e.key)}/?token=$_apiToken";
                                   return Card(
                                     elevation: 0,
                                     color: Colors.grey.shade50,
