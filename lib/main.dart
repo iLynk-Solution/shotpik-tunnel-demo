@@ -242,9 +242,11 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         final subPath = p.joinAll(pathSegments.sublist(1));
         final fullPath = p.join(localBasePath, subPath);
 
-        if (pathSegments.length > 7) {
+        if (pathSegments.length > 3) {
           request.response.statusCode = HttpStatus.forbidden;
-          request.response.write('403 Forbidden: Deep path.');
+          request.response.write(
+            '403 Forbidden: Độ sâu thư mục vượt quá giới hạn (tối đa 2 tầng).',
+          );
           return;
         }
 
@@ -279,6 +281,61 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     return port;
   }
 
+  /// Hàm đệ quy để xây dựng cây thư mục JSON hỗ trợ đến 2 tầng con
+  Future<List<Map<String, dynamic>>> _buildJsonTree(
+    Directory dir,
+    String virtualPath,
+    int currentDepth,
+    int maxDepth,
+    String tokenSuffix,
+  ) async {
+    if (currentDepth >= maxDepth) return [];
+
+    final List<Map<String, dynamic>> items = [];
+    try {
+      final entities = await dir.list().toList();
+      // Sắp xếp: Thư mục trước, file sau
+      entities.sort((a, b) {
+        if (a is Directory && b is File) return -1;
+        if (a is File && b is Directory) return 1;
+        return a.path.toLowerCase().compareTo(b.path.toLowerCase());
+      });
+
+      for (final e in entities) {
+        final name = p.basename(e.path);
+        if (name.startsWith('.')) continue; // Lọc file ẩn và hệ thống
+
+        final isDir = e is Directory;
+        final pathPrefix = virtualPath.endsWith('/') ? '' : '/';
+        final itemVirtualPath =
+            "$virtualPath$pathPrefix${Uri.encodeComponent(name)}";
+        final publicUrl =
+            "$_tunnelDomain$itemVirtualPath${isDir ? '/' : ''}$tokenSuffix";
+
+        final item = {
+          "name": name,
+          "isDir": isDir,
+          "size": e is File ? e.lengthSync() : 0,
+          "ext": p.extension(e.path).replaceAll('.', ''),
+          "url": publicUrl,
+        };
+
+        // Nếu là thư mục và chưa vượt quá độ sâu cho phép (2 tầng), lấy tiếp nội dung
+        if (isDir && (currentDepth + 1) < maxDepth) {
+          item["children"] = await _buildJsonTree(
+            e as Directory,
+            "$itemVirtualPath/",
+            currentDepth + 1,
+            maxDepth,
+            tokenSuffix,
+          );
+        }
+        items.add(item);
+      }
+    } catch (_) {}
+    return items;
+  }
+
   Future<void> _renderFolderContent(
     HttpRequest request,
     String virtualName,
@@ -291,27 +348,23 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         .where((e) => !p.basename(e.path).startsWith('.'))
         .toList();
 
-    // Hỗ trợ REST API chuẩn hóa
+    final currentToken = request.uri.queryParameters['token'];
+    final tokenSuffix = currentToken != null ? '?token=$currentToken' : '';
+
+    // Hỗ trợ REST API chuẩn hóa (Trả về cấu trúc cây phân cấp tối đa 2 tầng)
     final isApiRequest =
         request.headers.value('accept')?.contains('application/json') ?? false;
     if (isApiRequest) {
-      final jsonList = entities.map((e) {
-        final name = p.basename(e.path);
-        final isDir = e is Directory;
-        final pathPrefix = request.uri.path.endsWith('/') ? '' : '/';
-        final publicUrl =
-            "$_tunnelDomain${request.uri.path}$pathPrefix${Uri.encodeComponent(name)}${isDir ? '/' : ''}";
-        return {
-          "name": name,
-          "isDir": isDir,
-          "size": e is File ? e.lengthSync() : 0,
-          "ext": p.extension(e.path).replaceAll('.', ''),
-          "url": publicUrl,
-        };
-      }).toList();
+      final jsonTree = await _buildJsonTree(
+        Directory(fullPath),
+        request.uri.path,
+        segments.length, // Độ sâu hiện tại của request
+        3, // Giới hạn tối đa 3 segments (VirtualName + 2 tầng con)
+        tokenSuffix,
+      );
 
       request.response.headers.contentType = ContentType.json;
-      request.response.write(jsonEncode(jsonList)); // Trả về JSON chuẩn
+      request.response.write(jsonEncode(jsonTree));
       return;
     }
 
@@ -335,7 +388,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     buffer.write('<div class="header">');
     buffer.write('  <div class="breadcrumb">');
     buffer.write(
-      '    <a href="..">📁 Thư mục gốc</a> <span>/ $virtualName / $relPathInFolder</span>',
+      '    <a href="..$tokenSuffix">📁 Thư mục gốc</a><span>/$virtualName${relPathInFolder.isEmpty ? '' : '/$relPathInFolder'}</span>',
     );
     buffer.write('  </div>');
     buffer.write('  <h1>Bộ sưu tập Media</h1>');
@@ -344,7 +397,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     // Nút BACK nằm ngoài Grid
     if (relPathInFolder.isNotEmpty) {
       buffer.write('<div class="back-navigation">');
-      buffer.write('  <a href=".." class="btn-back">');
+      buffer.write('  <a href="..$tokenSuffix" class="btn-back">');
       buffer.write('    <span class="btn-icon">↩️</span>');
       buffer.write('    <span class="btn-text">Quay lại thư mục cha</span>');
       buffer.write('  </a>');
@@ -358,17 +411,28 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       final isDir = entity is Directory;
       final ext = p.extension(entity.path).toLowerCase();
       final urlName = Uri.encodeComponent(name) + (isDir ? '/' : '');
+      final fullLink = "$urlName$tokenSuffix";
+
+      final subSegments = relPathInFolder
+          .split(p.separator)
+          .where((s) => s.isNotEmpty)
+          .toList();
+      final isAtMaxDepth = isDir && subSegments.length >= 2;
 
       bool isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp'].contains(ext);
       bool isVideo = ['.mp4', '.mov', '.avi', '.mkv'].contains(ext);
 
-      buffer.write(
-        '<a href="$urlName" class="card ${isDir ? 'dir-card' : ''}">',
-      );
+      if (isAtMaxDepth) {
+        buffer.write('<div class="card disabled-card">');
+      } else {
+        buffer.write(
+          '<a href="$fullLink" class="card ${isDir ? 'dir-card' : ''}">',
+        );
+      }
 
       if (isImage) {
         buffer.write(
-          '  <div class="media-preview" style="background-image: url(\'$urlName\')"></div>',
+          '  <div class="media-preview" style="background-image: url(\'$urlName$tokenSuffix\')"></div>',
         );
       } else if (isVideo) {
         buffer.write('  <div class="media-preview video-overlay">📽️</div>');
@@ -380,18 +444,30 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
       buffer.write('  <div class="info">');
       buffer.write('    <div class="name">$name</div>');
-      if (!isDir) {
+      if (isDir) {
+        if (isAtMaxDepth) {
+          buffer.write(
+            '    <div class="size locked-badge">🔒 Giới hạn 2 tầng</div>',
+          );
+        } else {
+          buffer.write('    <div class="size">Thư mục</div>');
+        }
+      } else {
         final size = (entity as File).lengthSync();
         buffer.write(
           '    <div class="size">${(size / 1024).toStringAsFixed(1)} KB</div>',
         );
       }
       buffer.write('  </div>');
-      buffer.write('</a>');
+      if (isAtMaxDepth) {
+        buffer.write('</div>');
+      } else {
+        buffer.write('</a>');
+      }
     }
 
     buffer.write('</div>');
-    buffer.write('<div class="footer">Cung cấp bởi Shotpik Tunnel Demo</div>');
+    buffer.write('<div class="footer">Cung cấp bởi Shotpik Agent</div>');
     buffer.write('</body></html>');
 
     request.response.headers.contentType = ContentType.html;
@@ -430,6 +506,10 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       .info { padding: 12px; }
       .name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .size { font-size: 12px; color: #64748b; margin-top: 4px; }
+
+      .disabled-card { opacity: 0.6; cursor: not-allowed; position: relative; }
+      .disabled-card:hover { transform: none; box-shadow: none; border-color: #e2e8f0; }
+      .locked-badge { color: #ef4444; font-weight: 600; display: flex; align-items: center; gap: 4px; }
       
       .footer { text-align: center; margin-top: 50px; color: #94a3b8; font-size: 13px; }
       
