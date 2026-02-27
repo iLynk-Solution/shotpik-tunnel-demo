@@ -72,22 +72,28 @@ class _TunnelHomeState extends State<TunnelHome> {
 
   Future<int> _startServer({int bindPort = 0}) async {
     await _server?.close(force: true);
+
+    // Luôn chạy HTTP thuần túy để khớp cấu hình Dashboard hiện tại
     _server = await HttpServer.bind(InternetAddress.anyIPv4, bindPort);
     final port = _server!.port;
-    log("SERVER BIND: http://0.0.0.0:$port");
+    log("SERVER BIND (HTTP): http://localhost:$port");
 
     _server!.listen((HttpRequest request) async {
       try {
         final requestPath = Uri.decodeComponent(request.uri.path);
-        log("--> ${request.method} $requestPath");
+        log(
+          "--> [${request.connectionInfo?.remoteAddress.address}] ${request.method} $requestPath",
+        );
 
         final pathSegments = requestPath
             .split('/')
             .where((s) => s.isNotEmpty)
             .toList();
 
+        // Yêu cầu: Không cho truy cập link gốc (/)
         if (pathSegments.isEmpty) {
-          await _renderIndexPage(request);
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.write('404 Not Found');
           return;
         }
 
@@ -142,32 +148,6 @@ class _TunnelHomeState extends State<TunnelHome> {
       }
     });
     return port;
-  }
-
-  Future<void> _renderIndexPage(HttpRequest request) async {
-    final buffer = StringBuffer();
-    buffer.write('<!DOCTYPE html><html><head><meta charset="utf-8">');
-    buffer.write(
-      '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    );
-    buffer.write('<title>Share List</title>');
-    buffer.write(_getSharedStyles());
-    buffer.write('</head><body><div class="container">');
-    buffer.write('<h1>Active Folders</h1>');
-    buffer.write(
-      '<p class="depth-info">Count: ${_sharedFolders.length}</p><ul>',
-    );
-    _sharedFolders.forEach((name, _) {
-      buffer.write('<li class="dir"><a href="/$name/">$name/</a></li>');
-    });
-    if (_sharedFolders.isEmpty) {
-      buffer.write('<p>No shared folders available.</p>');
-    }
-    buffer.write(
-      '</ul><hr><p class="footer">Shotpik Tunnel</p></div></body></html>',
-    );
-    request.response.headers.contentType = ContentType.html;
-    request.response.write(buffer.toString());
   }
 
   Future<void> _renderFolderContent(
@@ -234,7 +214,7 @@ class _TunnelHomeState extends State<TunnelHome> {
     await _stopEverything(clearFolders: false);
     setState(() {
       _isConnecting = true;
-      _isRunning = false; // Reset to ensure UI shows connecting
+      _isRunning = false;
       _error = null;
       _statusMessage = 'Initializing...';
       _shouldRestart = true;
@@ -284,11 +264,11 @@ class _TunnelHomeState extends State<TunnelHome> {
       '--no-autoupdate',
       '--protocol',
       'http2',
-      '--no-tls-verify',
       if (_tunnelToken.isNotEmpty) ...[
         'run',
         '--token',
         _tunnelToken,
+        '--no-tls-verify',
       ] else ...[
         '--url',
         'http://127.0.0.1:$port',
@@ -327,7 +307,6 @@ class _TunnelHomeState extends State<TunnelHome> {
       if (!_isRunning && _isConnecting && mounted) {
         setState(() {
           _error = 'Slow connection. Still trying...';
-          // Keep _isConnecting = true to allow logs to continue updating the state
         });
       }
     });
@@ -336,7 +315,6 @@ class _TunnelHomeState extends State<TunnelHome> {
   void _processTunnelLog(String data) {
     log(data);
 
-    // Bắt URL Quick Tunnel nếu có
     final match = RegExp(
       r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com',
     ).firstMatch(data);
@@ -344,7 +322,6 @@ class _TunnelHomeState extends State<TunnelHome> {
       setState(() => _tunnelUrl = match.group(0));
     }
 
-    // Xử lý lỗi timeout mạng
     if (data.contains('timeout') || data.contains('7844')) {
       _retryCount++;
       if (_retryCount > 6) {
@@ -352,7 +329,6 @@ class _TunnelHomeState extends State<TunnelHome> {
       }
     }
 
-    // Nhận diện trạng thái ONLINE
     bool isRegistered =
         data.contains('Registered tunnel connection') ||
         data.contains('Connected to') ||
@@ -367,7 +343,6 @@ class _TunnelHomeState extends State<TunnelHome> {
         _error = null;
         _statusMessage = null;
       });
-      log("TUNNEL IS ONLINE NOW");
     }
   }
 
@@ -437,7 +412,6 @@ class _TunnelHomeState extends State<TunnelHome> {
         padding: const EdgeInsets.all(24),
         child: Column(
           children: [
-            // Section 1: Tunnel Control
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
@@ -536,8 +510,6 @@ class _TunnelHomeState extends State<TunnelHome> {
               ),
             ),
             const SizedBox(height: 20),
-
-            // Section 2: Folder Sharing
             Expanded(
               child: Container(
                 padding: const EdgeInsets.all(20),
@@ -703,8 +675,6 @@ class _TunnelHomeState extends State<TunnelHome> {
                 ),
               ),
             ),
-
-            // Section 3: Debug Log
             if (kDebugMode)
               Container(
                 height: 120,
