@@ -105,5 +105,13 @@ flutter:
   #       - asset: fonts/TrajanPro_Bold.ttf
   #         weight: 700
   #
-  # For details regarding fonts from package dependencies,
-  # see https://flutter.dev/to/font-from-package
+  fonts:
+    - family: Geomanist
+      fonts:
+        - asset: assets/fonts/Geomanist/Geomanist-Regular.otf
+        - asset: assets/fonts/Geomanist/Geomanist-Book.otf
+          weight: 300
+        - asset: assets/fonts/Geomanist/Geomanist-Medium.otf
+          weight: 500
+        - asset: assets/fonts/Geomanist/Geomanist-Bold.otf
+          weight: 700
