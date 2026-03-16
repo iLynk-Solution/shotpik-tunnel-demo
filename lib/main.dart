@@ -9,6 +9,13 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:app_links/app_links.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:encrypt/encrypt.dart' as encrypt;
+import 'package:pointycastle/api.dart' as pc;
+import 'package:pointycastle/asymmetric/api.dart' as pc_asym;
+import 'package:jwt_decoder/jwt_decoder.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -75,9 +82,17 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   static const int _maxRetries = 5;
   int? _currentPort;
 
+  // ── Authentication config ──────────────────────────────────────────────
+  String? _authToken;
+  Map<String, dynamic>? _userData;
+  final _appLinks = AppLinks();
+  StreamSubscription? _linkSubscription;
+  String? _privateKeyPem; // Store private key for RSA signing
+  // ─────────────────────────────────────────────────────────────────────
+
   // ── Named tunnel config ──────────────────────────────────────────────
   static const String _tunnelToken =
-      'eyJhIjoiOTYwZDRlYmMyOTBlMzY5M2IyOGNlYjk1MTY0NWIwZmYiLCJ0IjoiODlkZjkwNTQtNjVmNy00Y2Y0LThjODAtNjEyMDQ2YjZmYmFiIiwicyI6Ik16a3hZVGRrWkRrdE5XRTRZUzAwWlRObUxUazRPR1V0WldKbE9HRm1NamxpWVRkaCJ9';
+      'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRwczovL3Nob3RwaWsuY29tL2FwaS92MS9hdXRoL2xvZ2luIiwiaWF0IjoxNzczNjMzMTMyLCJleHAiOjE3NzQyMzc5MzIsIm5iZiI6MTc3MzYzMzEzMiwianRpIjoidkExeGh4M1BzbTEzVlBNaiIsInN1YiI6IjE0MzQ5IiwicHJ2IjoiMjNiZDVjODk0OWY2MDBhZGIzOWU3MDFjNDAwODcyZGI3YTU5NzZmNyIsImVtYWlsIjoidHV5ZW50Yi5naXRsYWJAZ21haWwuY29tIn0.NzqHWLT9_SMurtr2tA6rM_q1VKWhdX8_w4XWTXzKHYI';
   static const String _tunnelDomain = 'https://shotpik-tunnel.tuyendev.store';
   static const int _namedTunnelPort = 8080;
 
@@ -93,6 +108,138 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     super.initState();
     windowManager.addListener(this);
     initSystemTray();
+    _initDeepLinks();
+    _loadSavedSession();
+  }
+
+  Future<void> _loadSavedSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedToken = prefs.getString('auth_token');
+    if (savedToken != null && !JwtDecoder.isExpired(savedToken)) {
+      setState(() {
+        _authToken = savedToken;
+        try {
+          _userData = JwtDecoder.decode(savedToken);
+          log("Restored session for: ${_userData?['email'] ?? 'User'}");
+        } catch (e) {
+          log("Error decoding saved token: $e");
+        }
+      });
+    }
+  }
+
+  Future<void> _logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('auth_token');
+    setState(() {
+      _authToken = null;
+      _userData = null;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Logged out successfully')),
+    );
+  }
+
+  Future<void> _initDeepLinks() async {
+    // Handle app started from a link
+    try {
+      final initialUri = await _appLinks.getInitialLink();
+      if (initialUri != null) {
+        _handleIncomingLink(initialUri);
+      }
+    } catch (e) {
+      log("Error getting initial link: $e");
+    }
+
+    // Handle links while app is running
+    _linkSubscription = _appLinks.uriLinkStream.listen(
+      (Uri? uri) {
+        if (mounted) {
+          _handleIncomingLink(uri);
+        }
+      },
+      onError: (err) {
+        log("Deep link error: $err");
+      },
+    );
+  }
+
+  void _handleIncomingLink(Uri? uri) {
+    if (uri == null) return;
+    log("Incoming deep link: $uri");
+
+    bool isAuthLink = (uri.scheme == 'tunnel' && uri.host == 'auth') ||
+        (uri.scheme == 'https' &&
+            uri.host == 'shotpik.com' &&
+            uri.path == '/auth');
+
+    if (isAuthLink) {
+      final token = uri.queryParameters['token'];
+      if (token != null) {
+        SharedPreferences.getInstance().then((prefs) {
+          prefs.setString('auth_token', token);
+        });
+
+        setState(() {
+          _authToken = token;
+          try {
+            _userData = JwtDecoder.decode(token);
+            log("User logged in: ${_userData?['email'] ?? 'Unknown'}");
+          } catch (e) {
+            log("Error decoding token: $e");
+          }
+        });
+
+        // Success notification or UI update
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Logged in successfully as ${_userData?['email'] ?? 'User'}',
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _loginWeb() async {
+    // tunnel://auth → tunnel%3A%2F%2Fauth
+    final url = Uri(
+      scheme: 'https',
+      host: 'shotpik.com',
+      path: '/login',
+      queryParameters: {
+        'redirect_uri': 'tunnel://auth',
+      },
+    );
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    } else {
+      log("Could not launch $url");
+    }
+  }
+
+  // Example of RSA signing as per flow-authen.md
+  String _signBody(String body) {
+    if (_privateKeyPem == null) return "";
+    try {
+      final parser = encrypt.RSAKeyParser();
+      final privateKey = parser.parse(_privateKeyPem!) as pc_asym.RSAPrivateKey;
+
+      final signer = pc.Signer("SHA-256/RSA");
+      signer.init(
+        true,
+        pc.PrivateKeyParameter<pc_asym.RSAPrivateKey>(privateKey),
+      );
+      final sig =
+          signer.generateSignature(Uint8List.fromList(utf8.encode(body)))
+              as pc_asym.RSASignature;
+
+      return base64Encode(sig.bytes);
+    } catch (e) {
+      log("Signing error: $e");
+      return "";
+    }
   }
 
   Future<void> initSystemTray() async {
@@ -715,6 +862,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     windowManager.removeListener(this);
     _stopEverything();
     _scroll.dispose();
+    _linkSubscription?.cancel();
     super.dispose();
   }
 
@@ -797,6 +945,64 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                       ),
                     ],
                   ),
+                  const SizedBox(height: 20),
+                  const Divider(),
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            "AUTHENTICATION",
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.indigo,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _authToken != null
+                                ? "Logged in as: ${_userData?['email'] ?? 'User'}"
+                                : "Not authenticated",
+                            style: TextStyle(
+                              color: _authToken != null
+                                  ? Colors.green
+                                  : Colors.grey,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          if (_authToken != null)
+                            TextButton.icon(
+                              onPressed: _logout,
+                              icon: const Icon(Icons.logout,
+                                  size: 16, color: Colors.red),
+                              label: const Text("LOGOUT",
+                                  style: TextStyle(
+                                      color: Colors.red, fontSize: 12)),
+                            ),
+                          const SizedBox(width: 8),
+                          ElevatedButton.icon(
+                            onPressed: _loginWeb,
+                            icon: const Icon(Icons.login),
+                            label: Text(
+                              _authToken != null ? "RE-LOGIN" : "LOGIN WEB",
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              foregroundColor: Colors.black,
+                              side: const BorderSide(color: Colors.grey),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                   if (_tunnelUrl != null) ...[
                     const Divider(height: 30),
                     const Text(
@@ -827,6 +1033,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                 ],
               ),
             ),
+
             const SizedBox(height: 20),
             Expanded(
               child: Container(
