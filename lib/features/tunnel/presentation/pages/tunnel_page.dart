@@ -1,21 +1,25 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../../auth/logic/auth_manager.dart';
 import '../widgets/status_config_card.dart';
 import '../widgets/folder_list_card.dart';
-import '../widgets/debug_log_view.dart';
+import '../widgets/add_album_dialog.dart';
+import '../../domain/tunnel_models.dart';
+import '../../logic/tunnel_api_service.dart';
 
 class TunnelHome extends StatefulWidget {
-  const TunnelHome({super.key});
+  final AuthManager authManager;
+  const TunnelHome({super.key, required this.authManager});
 
   @override
   State<TunnelHome> createState() => _TunnelHomeState();
@@ -25,35 +29,23 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   final SystemTray _systemTray = SystemTray();
   final AppWindow _appWindow = AppWindow();
   final Menu _menu = Menu();
-  final AuthManager _authManager = AuthManager();
+  AuthManager get _authManager => widget.authManager;
 
   HttpServer? _server;
-  Process? _tunnelProcess;
-  StreamSubscription? _tunnelOutSub;
-  StreamSubscription? _tunnelErrSub;
 
-  final Map<String, String> _sharedFolders = {}; // {VirtualName: LocalPath}
-  String? _tunnelUrl;
+  final Map<String, SharedFolderData> _sharedFolders = {};
   String? _error;
   String? _statusMessage;
 
-  bool _isRunning = false;
+  bool _isRunning = false; // Local Server Status
   bool _isConnecting = false;
-  bool _shouldRestart = false;
 
-  int _retryCount = 0;
-  static const int _maxRetries = 5;
   int? _currentPort;
+  String? _mainTunnelUrl;
+  String? _mainTunnelToken;
+  Process? _mainTunnelProcess;
 
-  // ── Named tunnel config ──────────────────────────────────────────────
-  static const String _tunnelToken =
-      'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRwczovL3Nob3RwaWsuY29tL2FwaS92MS9hdXRoL2xvZ2luIiwiaWF0IjoxNzczNjMzMTMyLCJleHAiOjE3NzQyMzc5MzIsIm5iZiI6MTc3MzYzMzEzMiwianRpIjoidkExeGh4M1BzbTEzVlBNaiIsInN1YiI6IjE0MzQ5IiwicHJ2IjoiMjNiZDVjODk0OWY2MDBhZGIzOWU3MDFjNDAwODcyZGI3YTU5NzZmNyIsImVtYWlsIjoidHV5ZW50Yi5naXRsYWJAZ21haWwuY29tIn0.NzqHWLT9_SMurtr2tA6rM_q1VKWhdX8_w4XWTXzKHYI';
-  static const String _tunnelDomain = 'https://shotpik-tunnel.tuyendev.store';
-  static const int _namedTunnelPort = 8080;
-
-  // Thông tin bảo mật (Bearer Token)
-  static const String _apiToken = _tunnelToken;
-  // ─────────────────────────────────────────────────────────────────────
+  static const int _namedTunnelPort = 8888;
 
   final List<String> _logs = [];
   final ScrollController _scroll = ScrollController();
@@ -63,8 +55,73 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     super.initState();
     windowManager.addListener(this);
     initSystemTray();
-    _authManager.loadSavedSession();
     _authManager.addListener(_onAuthChanged);
+    _loadFolders();
+    
+    // Auto-start local server on app launch
+    _startServer(bindPort: _namedTunnelPort).then((port) {
+      _currentPort = port;
+      setState(() => _isRunning = true);
+    }).catchError((e) {
+      log("API Server failed to start: $e");
+      setState(() => _error = "API Port $_namedTunnelPort is already in use or blocked.");
+    });
+  }
+
+  Future<void> _loadFolders() async {
+    final prefs = await SharedPreferences.getInstance();
+    _mainTunnelToken = prefs.getString('main_tunnel_token');
+    _mainTunnelUrl = prefs.getString('main_tunnel_url');
+
+    final List<String>? folderList = prefs.getStringList('shared_folders');
+    if (folderList != null) {
+      setState(() {
+        for (var item in folderList) {
+          try {
+            final data = jsonDecode(item);
+            final name = data['name'] as String;
+            final nameUrl = data['nameUrl']?.toString() ?? name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_');
+            final path = data['path'] as String;
+            final id = data['id']?.toString() ?? _generateUuid();
+            _sharedFolders[id] = SharedFolderData(
+              id: id,
+              name: name,
+              nameUrl: nameUrl,
+              localPath: path,
+              tunnelUrl: data['url']?.toString(), // Restore previous URL
+            );
+          } catch (e) {
+            log("Error loading folder: $e");
+          }
+        }
+      });
+    }
+
+    // Auto-start everything if we have a token or previous folders
+    if (_sharedFolders.isNotEmpty || _mainTunnelToken != null) {
+      _startEverything();
+    }
+  }
+
+  Future<void> _saveFolders() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_mainTunnelToken != null) {
+      await prefs.setString('main_tunnel_token', _mainTunnelToken!);
+    }
+    if (_mainTunnelUrl != null) {
+      await prefs.setString('main_tunnel_url', _mainTunnelUrl!);
+    }
+
+    final List<String> folderList = _sharedFolders.values.map((f) {
+      return jsonEncode({
+        'id': f.id, 
+        'name': f.name, 
+        'nameUrl': f.nameUrl,
+        'path': f.localPath,
+        'url': f.tunnelUrl, // Persist the URL too
+      });
+    }).toList();
+    await prefs.setStringList('shared_folders', folderList);
   }
 
   void _onAuthChanged() {
@@ -75,7 +132,6 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   void dispose() {
     windowManager.removeListener(this);
     _authManager.removeListener(_onAuthChanged);
-    _authManager.dispose();
     _stopEverything();
     _scroll.dispose();
     super.dispose();
@@ -85,10 +141,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     String iconPath = Platform.isWindows
         ? 'assets/app_icon.ico'
         : 'assets/shotpik-agent.png';
-
     await _systemTray.initSystemTray(iconPath: iconPath);
     await _updateTrayMenu();
-
     _systemTray.registerSystemTrayEventHandler((eventName) {
       if (eventName == kSystemTrayEventClick) {
         _appWindow.show();
@@ -101,12 +155,12 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   Future<void> _updateTrayMenu() async {
     await _menu.buildFrom([
       MenuItemLabel(
-        label: _isRunning ? 'Status: ONLINE' : 'Status: OFFLINE',
+        label: _isRunning ? 'Status: SERVER ACTIVE' : 'Status: OFFLINE',
         enabled: false,
       ),
       MenuSeparator(),
       MenuItemLabel(
-        label: _isRunning ? 'Stop Tunnel' : 'Start Tunnel',
+        label: _isRunning ? 'Stop Service' : 'Start Service',
         onClicked: (menuItem) => _handleTunnelToggle(),
       ),
       MenuItemLabel(
@@ -132,6 +186,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   void log(String message) {
     if (!kDebugMode) return;
     if (!mounted) return;
+    debugPrint("TUNNEL LOG: $message");
     setState(() => _logs.add(message));
     Future.delayed(const Duration(milliseconds: 50), () {
       if (_scroll.hasClients) {
@@ -140,153 +195,159 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     });
   }
 
-  Future<int> _startServer({int bindPort = 0}) async {
-    await _server?.close(force: true);
-    _server = await HttpServer.bind(InternetAddress.anyIPv4, bindPort);
-    final port = _server!.port;
-    log("SERVER BIND (HTTP): http://localhost:$port");
-
-    _server!.listen((HttpRequest request) async {
-      try {
-        final authHeader = request.headers.value(HttpHeaders.authorizationHeader);
-        final urlToken = request.uri.queryParameters['token'];
-
-        bool isAuthorized = false;
-        if (authHeader != null && authHeader.startsWith('Bearer ')) {
-          if (authHeader.substring(7) == _apiToken) isAuthorized = true;
-        }
-        if (urlToken == _apiToken) isAuthorized = true;
-
-        if (!isAuthorized) {
-          request.response.statusCode = HttpStatus.forbidden;
-          final isJson = request.headers.value('accept')?.contains('application/json') ?? false;
-          if (isJson) {
-            request.response.headers.contentType = ContentType.json;
-            request.response.write(jsonEncode({"error": "Forbidden: Invalid Token"}));
-          } else {
-            request.response.write('403 Forbidden: Token không hợp lệ.');
-          }
-          await request.response.close();
-          return;
-        }
-
-        final requestPath = Uri.decodeComponent(request.uri.path);
-        log("--> [${request.connectionInfo?.remoteAddress.address}] ${request.method} $requestPath");
-
-        final pathSegments = requestPath.split('/').where((s) => s.isNotEmpty).toList();
-
-        if (pathSegments.isEmpty) {
-          request.response.statusCode = HttpStatus.notFound;
-          request.response.write('404 Not Found');
-          return;
-        }
-
-        final virtualName = pathSegments[0];
-        final isApiRequest = request.headers.value('accept')?.contains('application/json') ?? false;
-
-        if (!_sharedFolders.containsKey(virtualName)) {
-          request.response.statusCode = HttpStatus.notFound;
-          if (isApiRequest) {
-            request.response.write('{"error": "Folder not shared"}');
-          } else {
-            request.response.write('404 Not Found: Folder not shared.');
-          }
-          return;
-        }
-
-        if (pathSegments.length == 1 && !request.uri.path.endsWith('/')) {
-          await request.response.redirect(Uri.parse('${request.uri.path}/'));
-          return;
-        }
-
-        final localBasePath = _sharedFolders[virtualName]!;
-        final subPath = p.joinAll(pathSegments.sublist(1));
-        final fullPath = p.join(localBasePath, subPath);
-
-        if (pathSegments.length > 3) {
-          request.response.statusCode = HttpStatus.forbidden;
-          request.response.write('403 Forbidden: Độ sâu thư mục vượt quá giới hạn (tối đa 2 tầng).');
-          return;
-        }
-
-        final entityType = FileSystemEntity.typeSync(fullPath);
-        if (entityType == FileSystemEntityType.file) {
-          final file = File(fullPath);
-          request.response.headers.contentType = _getContentType(fullPath);
-          await request.response.addStream(file.openRead());
-        } else if (entityType == FileSystemEntityType.directory) {
-          if (!request.uri.path.endsWith('/')) {
-            await request.response.redirect(Uri.parse('${request.uri.path}/'));
-            return;
-          }
-          await _renderFolderContent(request, virtualName, localBasePath, pathSegments);
-        } else {
-          request.response.statusCode = HttpStatus.notFound;
-          request.response.write('404 Not Found');
-        }
-      } catch (e) {
-        log("Req Error: $e");
-      } finally {
-        try {
-          await request.response.close();
-        } catch (_) {}
-      }
-    });
-    return port;
+  String _generateUuid() {
+    final random = Random();
+    String generateByte() => random.nextInt(256).toRadixString(16).padLeft(2, '0');
+    return '${generateByte()}${generateByte()}${generateByte()}${generateByte()}-'
+        '${generateByte()}${generateByte()}-'
+        '4${generateByte().substring(1)}-'
+        '${(random.nextInt(4) + 8).toRadixString(16)}${generateByte().substring(1)}-'
+        '${generateByte()}${generateByte()}${generateByte()}${generateByte()}${generateByte()}${generateByte()}';
   }
 
-  Future<List<Map<String, dynamic>>> _buildJsonTree(
-    Directory dir,
-    String virtualPath,
-    int currentDepth,
-    int maxDepth,
-    String tokenSuffix,
-  ) async {
-    if (currentDepth >= maxDepth) return [];
-
-    final List<Map<String, dynamic>> items = [];
+  Future<int> _startServer({int bindPort = 0}) async {
+    await _server?.close(force: true);
     try {
-      final entities = await dir.list().toList();
-      entities.sort((a, b) {
-        if (a is Directory && b is File) return -1;
-        if (a is File && b is Directory) return 1;
-        return a.path.toLowerCase().compareTo(b.path.toLowerCase());
-      });
+      _server = await HttpServer.bind(InternetAddress.loopbackIPv4, bindPort, shared: true);
+      final port = _server!.port;
+      log("API SERVER STARTED: http://127.0.0.1:$port");
+      log("Use this address for LOCAL API calls.");
 
-      for (final e in entities) {
-        final name = p.basename(e.path);
-        if (name.startsWith('.')) continue;
+      _server!.listen((HttpRequest request) async {
+        try {
+          final authHeader = request.headers.value(
+            HttpHeaders.authorizationHeader,
+          );
+          final urlToken = request.uri.queryParameters['token'];
+          bool isAuthorized = false;
+          final currentApiToken = _authManager.authToken;
 
-        final isDir = e is Directory;
-        final pathPrefix = virtualPath.endsWith('/') ? '' : '/';
-        final itemVirtualPath = "$virtualPath$pathPrefix${Uri.encodeComponent(name)}";
-        final publicUrl = "$_tunnelDomain$itemVirtualPath${isDir ? '/' : ''}$tokenSuffix";
+          if (authHeader != null && authHeader.startsWith('Bearer ')) {
+            if (authHeader.substring(7) == currentApiToken) isAuthorized = true;
+          }
+          if (urlToken == currentApiToken) isAuthorized = true;
 
-        final item = {
-          "name": name,
-          "isDir": isDir,
-          "size": e is File ? e.lengthSync() : 0,
-          "ext": p.extension(e.path).replaceAll('.', ''),
-          "url": publicUrl,
-        };
+          if (!isAuthorized) {
+            request.response.statusCode = HttpStatus.forbidden;
+            request.response.write('403 Forbidden: Token không hợp lệ.');
+            await request.response.close();
+            return;
+          }
 
-        if (isDir && (currentDepth + 1) < maxDepth) {
-          item["children"] = await _buildJsonTree(e, "$itemVirtualPath/", currentDepth + 1, maxDepth, tokenSuffix);
+          final requestPath = Uri.decodeComponent(request.uri.path);
+          log("--> ${request.method} $requestPath");
+
+          final apiService = TunnelApiService(
+            sharedFolders: _sharedFolders,
+            onLog: log,
+            onAddFolder: (id, name, nameUrl, path) async {
+              if (!Directory(path).existsSync()) {
+                return "Error: Local path does not exist: $path";
+              }
+              setState(() {
+                _sharedFolders[id] = SharedFolderData(
+                  id: id,
+                  name: name, 
+                  nameUrl: nameUrl,
+                  localPath: path,
+                );
+              });
+              _saveFolders();
+              return await _startTunnelForFolder(id);
+            },
+            onStartService: _startEverything,
+            onUpdateConfig: (token) async {
+              setState(() {
+                _mainTunnelToken = token;
+              });
+              await _saveFolders();
+              await _startEverything(); // Restart to apply new token
+            },
+          );
+
+          if (requestPath.startsWith('/api/v1/')) {
+            await apiService.handleRequest(request);
+            return;
+          }
+
+          final pathSegments = requestPath
+              .split('/')
+              .where((s) => s.isNotEmpty)
+              .toList();
+          if (pathSegments.isEmpty) {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.write('404 Not Found');
+            return;
+          }
+
+          final virtualName = pathSegments[0];
+          SharedFolderData? folderData = _sharedFolders[virtualName]; // Try ID first
+
+          if (folderData == null) {
+            // Try searching by nameUrl (Unique identifier)
+            for (var f in _sharedFolders.values) {
+              if (f.nameUrl == virtualName) {
+                folderData = f;
+                break;
+              }
+            }
+          }
+
+          if (folderData == null) {
+            // Try searching by name (Legacy)
+            for (var f in _sharedFolders.values) {
+              if (f.name == virtualName) {
+                folderData = f;
+                break;
+              }
+            }
+          }
+
+          if (folderData == null) {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.write('404 Not Found: Folder not shared.');
+            return;
+          }
+          final subPath = p.joinAll(pathSegments.sublist(1));
+          final fullPath = p.join(folderData.localPath, subPath);
+
+          final entityType = FileSystemEntity.typeSync(fullPath);
+          if (entityType == FileSystemEntityType.file) {
+            final file = File(fullPath);
+            request.response.headers.contentType = _getContentType(fullPath);
+            await request.response.addStream(file.openRead());
+          } else if (entityType == FileSystemEntityType.directory) {
+            if (!request.uri.path.endsWith('/')) {
+              await request.response.redirect(Uri.parse('${request.uri.path}/'));
+              return;
+            }
+            await _renderFolderContent(request, folderData, pathSegments);
+          } else {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.write('404 Not Found');
+          }
+        } catch (e) {
+          log("Req Error: $e");
+        } finally {
+          try {
+            await request.response.close();
+          } catch (_) {}
         }
-        items.add(item);
-      }
-    } catch (_) {}
-    return items;
+      });
+      return port;
+    } catch (e) {
+      log("ERROR starting server: $e");
+      rethrow;
+    }
   }
 
   Future<void> _renderFolderContent(
     HttpRequest request,
-    String virtualName,
-    String localBasePath,
+    SharedFolderData folder,
     List<String> segments,
   ) async {
     final relPathInFolder = p.joinAll(segments.sublist(1));
-    final fullPath = p.join(localBasePath, relPathInFolder);
+    final fullPath = p.join(folder.localPath, relPathInFolder);
     final entities = (await Directory(fullPath).list().toList())
         .where((e) => !p.basename(e.path).startsWith('.'))
         .toList();
@@ -294,142 +355,30 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     final currentToken = request.uri.queryParameters['token'];
     final tokenSuffix = currentToken != null ? '?token=$currentToken' : '';
 
-    final isApiRequest = request.headers.value('accept')?.contains('application/json') ?? false;
-    if (isApiRequest) {
-      final jsonTree = await _buildJsonTree(Directory(fullPath), request.uri.path, segments.length, 3, tokenSuffix);
-      request.response.headers.contentType = ContentType.json;
-      request.response.write(jsonEncode(jsonTree));
-      return;
-    }
-
-    entities.sort((a, b) {
-      if (a is Directory && b is File) return -1;
-      if (a is File && b is Directory) return 1;
-      return a.path.toLowerCase().compareTo(b.path.toLowerCase());
-    });
-
     final buffer = StringBuffer();
-    buffer.write('<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8">');
-    buffer.write('<meta name="viewport" content="width=device-width, initial-scale=1">');
-    buffer.write('<title>Gallery - $virtualName</title>');
-    buffer.write('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">');
+    buffer.write(
+      '<!DOCTYPE html><html><head><meta charset="utf-8"><title>${folder.name}</title>',
+    );
     buffer.write(_getSharedStyles());
-    buffer.write('</head><body>');
-    buffer.write('<div class="header">');
-    buffer.write('  <div class="breadcrumb">');
-    buffer.write('    <a href="..$tokenSuffix">📁 Thư mục gốc</a><span>/$virtualName${relPathInFolder.isEmpty ? '' : '/$relPathInFolder'}</span>');
-    buffer.write('  </div>');
-    buffer.write('  <h1>Bộ sưu tập Media</h1>');
-    buffer.write('</div>');
-
-    if (relPathInFolder.isNotEmpty) {
-      buffer.write('<div class="back-navigation">');
-      buffer.write('  <a href="..$tokenSuffix" class="btn-back">');
-      buffer.write('    <span class="btn-icon">↩️</span>');
-      buffer.write('    <span class="btn-text">Quay lại thư mục cha</span>');
-      buffer.write('  </a>');
-      buffer.write('</div>');
-    }
-
-    buffer.write('<div class="gallery-grid">');
+    buffer.write(
+      '</head><body><div class="header"><h1>${folder.name}</h1></div><div class="gallery-grid">',
+    );
 
     for (final entity in entities) {
       final name = p.basename(entity.path);
       final isDir = entity is Directory;
-      final ext = p.extension(entity.path).toLowerCase();
       final urlName = Uri.encodeComponent(name) + (isDir ? '/' : '');
-      final fullLink = "$urlName$tokenSuffix";
-
-      final subSegments = relPathInFolder.split(p.separator).where((s) => s.isNotEmpty).toList();
-      final isAtMaxDepth = isDir && subSegments.length >= 2;
-
-      bool isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp'].contains(ext);
-      bool isVideo = ['.mp4', '.mov', '.avi', '.mkv'].contains(ext);
-
-      if (isAtMaxDepth) {
-        buffer.write('<div class="card disabled-card">');
-      } else {
-        buffer.write('<a href="$fullLink" class="card ${isDir ? 'dir-card' : ''}">');
-      }
-
-      if (isImage) {
-        buffer.write('  <div class="media-preview" style="background-image: url(\'$urlName$tokenSuffix\')"></div>');
-      } else if (isVideo) {
-        buffer.write('  <div class="media-preview video-overlay">📽️</div>');
-      } else if (isDir) {
-        buffer.write('  <div class="media-preview dir-preview">📂</div>');
-      } else {
-        buffer.write('  <div class="media-preview file-preview">📄</div>');
-      }
-
-      buffer.write('  <div class="info">');
-      buffer.write('    <div class="name">$name</div>');
-      if (isDir) {
-        if (isAtMaxDepth) {
-          buffer.write('    <div class="size locked-badge">🔒 Giới hạn 2 tầng</div>');
-        } else {
-          buffer.write('    <div class="size">Thư mục</div>');
-        }
-      } else {
-        final size = (entity as File).lengthSync();
-        buffer.write('    <div class="size">${(size / 1024).toStringAsFixed(1)} KB</div>');
-      }
-      buffer.write('  </div>');
-      if (isAtMaxDepth) {
-        buffer.write('</div>');
-      } else {
-        buffer.write('</a>');
-      }
+      buffer.write('<a href="$urlName$tokenSuffix" class="card">');
+      buffer.write('<div class="info"><div class="name">$name</div></div></a>');
     }
-
-    buffer.write('</div>');
-    buffer.write('<div class="footer">Cung cấp bởi Shotpik Agent</div>');
-    buffer.write('</body></html>');
+    buffer.write('</div></body></html>');
 
     request.response.headers.contentType = ContentType.html;
     request.response.write(buffer.toString());
   }
 
-  String _getSharedStyles() {
-    return '''<style>
-      :root { --primary: #6366f1; --bg: #f8fafc; --card: #ffffff; }
-      body { font-family: 'Inter', sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #1e293b; }
-      .header { max-width: 1200px; margin: 0 auto 30px; }
-      .breadcrumb { font-size: 14px; color: #64748b; margin-bottom: 8px; }
-      .breadcrumb a { color: var(--primary); text-decoration: none; }
-      h1 { margin: 0; font-size: 28px; font-weight: 600; }
-      
-      .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; max-width: 1200px; margin: 0 auto; }
-      
-      .back-navigation { max-width: 1200px; margin: 0 auto 20px; }
-      .btn-back { display: inline-flex; align-items: center; padding: 10px 24px; background: #fff; border: 1px solid #e2e8f0; 
-                  border-radius: 14px; text-decoration: none; color: #475569; font-weight: 600; font-size: 14px; 
-                  transition: all 0.2s; gap: 10px; }
-      .btn-back:hover { background: #f1f5f9; border-color: var(--primary); color: var(--primary); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
-      .btn-icon { font-size: 18px; }
-
-      .card { background: var(--card); border-radius: 16px; overflow: hidden; text-decoration: none; color: inherit; 
-              transition: transform 0.2s, box-shadow 0.2s; border: 1px solid #e2e8f0; display: flex; flex-direction: column; }
-      .card:hover { transform: translateY(-4px); box-shadow: 0 12px 20px -5px rgba(0,0,0,0.1); border-color: var(--primary); }
-      
-      .media-preview { height: 180px; background-size: cover; background-position: center; background-color: #f1f5f9; 
-                       display: flex; align-items: center; justify-content: center; font-size: 50px; }
-      .back-preview { background: #e2e8f0; color: #475569; }
-      .video-overlay { position: relative; color: #fff; background: #1e293b; }
-      .dir-preview { color: #f59e0b; background: #fffbeb; }
-      .file-preview { color: #94a3b8; }
-      
-      .info { padding: 12px; }
-      .name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .size { font-size: 12px; color: #64748b; margin-top: 4px; }
-
-      .disabled-card { opacity: 0.6; cursor: not-allowed; position: relative; }
-      .disabled-card:hover { transform: none; box-shadow: none; border-color: #e2e8f0; }
-      .locked-badge { color: #ef4444; font-weight: 600; display: flex; align-items: center; gap: 4px; }
-      
-      .footer { text-align: center; margin-top: 50px; color: #94a3b8; font-size: 13px; }
-    </style>''';
-  }
+  String _getSharedStyles() =>
+      '<style>body{font-family:sans-serif;background:#f8fafc;padding:20px;}.gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:20px;}.card{background:white;padding:15px;border-radius:12px;text-decoration:none;color:inherit;border:1px solid #e2e8f0;}</style>';
 
   Future<void> _handleTunnelToggle() async {
     if (_isRunning || _isConnecting) {
@@ -440,26 +389,47 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   }
 
   Future<void> _startEverything() async {
-    await _stopEverything(clearFolders: false);
     setState(() {
       _isConnecting = true;
-      _statusMessage = 'Initializing...';
-      _shouldRestart = true;
+      _statusMessage = 'Starting Service...';
     });
     try {
-      final bindPort = _tunnelToken.isNotEmpty ? _namedTunnelPort : 0;
-      final port = await _startServer(bindPort: bindPort);
-      _currentPort = port;
-      await _startTunnelExec(port);
+      // Proactively kill any zombie cloudflared processes from previous crashes
+      if (Platform.isMacOS) {
+        await Process.run('killall', ['cloudflared']);
+      }
+
+      if (_server == null) {
+        final port = await _startServer(bindPort: _namedTunnelPort);
+        _currentPort = port;
+      }
+      
+      setState(() {
+        _isRunning = true;
+        _statusMessage = 'Service Ready';
+      });
+      
+      _startMainTunnel(); // Start primary API tunnel
+
+      // Activate all folders
+      for (var folderId in _sharedFolders.keys) {
+        if (_mainTunnelToken == null || _mainTunnelToken!.isEmpty) {
+          // If using Quick Tunnels, add delay to avoid 429
+          await Future.delayed(const Duration(seconds: 2));
+        }
+        _startTunnelForFolder(folderId);
+      }
+      _updateTrayMenu();
     } catch (e) {
       setState(() {
-        _error = "Init Fail: $e";
+        _error = "Service fail: $e";
         _isConnecting = false;
+        _isRunning = false;
       });
     }
   }
 
-  Future<void> _startTunnelExec(int port) async {
+  Future<void> _startMainTunnel() async {
     final String exePath = Platform.resolvedExecutable;
     String cloudflaredPath;
     if (Platform.isMacOS) {
@@ -471,117 +441,255 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       if (Platform.isWindows) cloudflaredPath += ".exe";
     }
 
-    if (!File(cloudflaredPath).existsSync()) {
-      final altAppDir = File(exePath).parent.parent.parent.path;
-      final altPath = "$altAppDir/Resources/bin/cloudflared";
-      if (File(altPath).existsSync()) {
-        cloudflaredPath = altPath;
-      } else {
-        throw Exception("cloudflared binary missing.");
-      }
+    if (!File(cloudflaredPath).existsSync()) return;
+
+    if (!Platform.isWindows) {
+      await Process.run('chmod', ['+x', cloudflaredPath]);
     }
 
-    if (!Platform.isWindows) await Process.run('chmod', ['+x', cloudflaredPath]);
+    final List<String> args = [
+      'tunnel',
+      '--no-autoupdate',
+      '--protocol',
+      'http2',
+    ];
 
-    _tunnelProcess = await Process.start(cloudflaredPath, [
-      'tunnel', '--no-autoupdate', '--protocol', 'http2',
-      if (_tunnelToken.isNotEmpty) ...['run', '--token', _tunnelToken, '--no-tls-verify']
-      else ...['--url', 'http://127.0.0.1:$port'],
-    ]);
+    if (_mainTunnelToken != null && _mainTunnelToken!.isNotEmpty) {
+      args.addAll(['run', '--token', _mainTunnelToken!]);
+    } else {
+      args.addAll(['--url', 'http://127.0.0.1:$_currentPort']);
+    }
 
-    _tunnelOutSub = _tunnelProcess!.stdout.transform(SystemEncoding().decoder).listen(_processTunnelLog);
-    _tunnelErrSub = _tunnelProcess!.stderr.transform(SystemEncoding().decoder).listen(_processTunnelLog);
+    _mainTunnelProcess = await Process.start(cloudflaredPath, args);
 
-    _tunnelProcess!.exitCode.then((exitCode) async {
-      if (!mounted || !_shouldRestart) return;
-      if (_retryCount >= _maxRetries) {
-        setState(() {
-          _error = 'Tunnel crashed.';
-          _isRunning = false;
-          _isConnecting = false;
-          _shouldRestart = false;
-        });
-        return;
-      }
-      _retryCount++;
-      setState(() {
-        _isConnecting = true;
-        _statusMessage = 'Reconnect #$_retryCount...';
-      });
-      await Future.delayed(Duration(seconds: _retryCount * 2));
-      if (mounted && _shouldRestart) _startTunnelExec(_currentPort!);
-    });
-
-    Future.delayed(const Duration(seconds: 90), () {
-      if (!_isRunning && _isConnecting && mounted) {
-        setState(() => _error = 'Slow connection. Still trying...');
-      }
-    });
+    _mainTunnelProcess!.stdout
+        .transform(SystemEncoding().decoder)
+        .listen((data) => _processMainTunnelLog(data));
+    _mainTunnelProcess!.stderr
+        .transform(SystemEncoding().decoder)
+        .listen((data) => _processMainTunnelLog(data));
   }
 
-  void _processTunnelLog(String data) {
-    log(data);
+  void _processMainTunnelLog(String data) {
+    log("[GATEWAY] $data");
+    
+    // Check for random trycloudflare URL
     final match = RegExp(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com').firstMatch(data);
-    if (match != null) setState(() => _tunnelUrl = match.group(0));
-
-    if (data.contains('timeout') || data.contains('7844')) {
-      _retryCount++;
-      if (_retryCount > 6) setState(() => _error = "Network restriction: Port 7844 blocked.");
+    if (match != null) {
+      setState(() {
+        _mainTunnelUrl = match.group(0);
+        _isConnecting = false;
+        _saveFolders();
+      });
+      return;
     }
 
-    bool isRegistered = data.contains('Registered tunnel connection') ||
-        data.contains('Connected to') ||
-        data.contains('Updated to new configuration');
-
-    if (isRegistered && !_isRunning) {
+    // Check for named tunnel success (if using token)
+    if (_mainTunnelToken != null && (data.contains("Registered tunnel") || data.contains("Connection") && data.contains("established"))) {
       setState(() {
-        _tunnelUrl = _tunnelToken.isNotEmpty ? _tunnelDomain : _tunnelUrl;
-        _isRunning = true;
+        _mainTunnelUrl = "https://shotpik-tunnel.tuyendev.store";
         _isConnecting = false;
-        _retryCount = 0;
-        _error = null;
-        _statusMessage = null;
+        _saveFolders();
       });
-      _updateTrayMenu();
+    }
+  }
+
+  final Map<String, Completer<String>> _tunnelCompleters = {};
+
+  Future<String?> _startTunnelForFolder(String folderName) async {
+    final folderData = _sharedFolders[folderName];
+    if (folderData == null) return "Error: Folder not found";
+
+    if (folderData.tunnelUrl != null) {
+      return folderData.tunnelUrl;
+    }
+
+    // If we have a main domain token, we DON'T start sub-tunnels.
+    // We just return the main URL with the folder name as the path.
+    if (_mainTunnelToken != null && _mainTunnelToken!.isNotEmpty) {
+      final baseUrl = _mainTunnelUrl ?? "https://shotpik-tunnel.tuyendev.store";
+      final albumUrl = "$baseUrl/${Uri.encodeComponent(folderData.nameUrl)}/";
+      setState(() {
+        folderData.tunnelUrl = albumUrl; // Store FULL URL
+        folderData.isConnecting = false;
+      });
+      return albumUrl;
+    }
+
+    // Capture existing completer if one is already running
+    if (_tunnelCompleters.containsKey(folderName)) {
+      return _tunnelCompleters[folderName]!.future;
+    }
+
+    // If a process exists but no URL, maybe it's stuck or just starting.
+    // For simplicity, if no process, start it.
+    if (folderData.process == null) {
+      final String exePath = Platform.resolvedExecutable;
+      String cloudflaredPath;
+      if (Platform.isMacOS) {
+        final appDir = File(exePath).parent.parent.path;
+        cloudflaredPath =
+            "$appDir/Frameworks/App.framework/Resources/flutter_assets/assets/bin/cloudflared";
+      } else {
+        final appDir = File(exePath).parent.path;
+        cloudflaredPath = "$appDir/data/flutter_assets/assets/bin/cloudflared";
+        if (Platform.isWindows) cloudflaredPath += ".exe";
+      }
+
+      if (!File(cloudflaredPath).existsSync()) {
+        final altAppDir = File(exePath).parent.parent.parent.path;
+        final altPath = "$altAppDir/Resources/bin/cloudflared";
+        if (File(altPath).existsSync()) {
+          cloudflaredPath = altPath;
+        } else {
+          return "Error: cloudflared missing";
+        }
+      }
+
+      if (!Platform.isWindows) {
+        await Process.run('chmod', ['+x', cloudflaredPath]);
+      }
+
+      final process = await Process.start(cloudflaredPath, [
+        'tunnel',
+        '--no-autoupdate',
+        '--protocol',
+        'http2',
+        '--url',
+        'http://127.0.0.1:$_currentPort',
+      ]);
+
+      folderData.process = process;
+      folderData.outSub = process.stdout
+          .transform(SystemEncoding().decoder)
+          .listen((data) => _processFolderTunnelLog(folderName, data));
+      folderData.errSub = process.stderr
+          .transform(SystemEncoding().decoder)
+          .listen((data) => _processFolderTunnelLog(folderName, data));
+    }
+
+    final completer = Completer<String>();
+    _tunnelCompleters[folderName] = completer;
+
+    // Timeout after 15 seconds if no URL found
+    return completer.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () {
+        _tunnelCompleters.remove(folderName);
+        return "Pending (Starting...)";
+      },
+    );
+  }
+
+  void _processFolderTunnelLog(String folderName, String data) {
+    log("[$folderName] $data");
+    final folderData = _sharedFolders[folderName];
+    if (folderData == null) return;
+    final match = RegExp(
+      r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com',
+    ).firstMatch(data);
+    if (match != null) {
+      if (mounted) {
+        final baseUrl = match.group(0)!;
+        final albumUrl = "$baseUrl/${Uri.encodeComponent(folderData.nameUrl)}/";
+        setState(() {
+          folderData.tunnelUrl = albumUrl; // Store FULL URL
+          folderData.isConnecting = false;
+        });
+        _tunnelCompleters.remove(folderName)?.complete(albumUrl);
+      }
     }
   }
 
   Future<void> _startSharing() async {
     if (!_isRunning) return;
-    final folder = await getDirectoryPath(confirmButtonText: 'Select Share Folder');
-    if (folder == null) return;
-    final folderName = p.basename(folder);
-    if (_sharedFolders.containsKey(folderName)) return;
-    setState(() => _sharedFolders[folderName] = folder);
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => const AddAlbumDialog(),
+    );
+    if (result != null) {
+      final name = result['name'] as String;
+      final path = result['path'] as String;
+      final nameUrl = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_');
+      
+      final newData = SharedFolderData(
+        id: _generateUuid(),
+        name: name, 
+        nameUrl: nameUrl,
+        localPath: path,
+      );
+      setState(() => _sharedFolders[newData.id] = newData);
+      _saveFolders();
+      _startTunnelForFolder(newData.id);
+    }
   }
 
-  void _removeFolder(String name) async {
-    setState(() => _sharedFolders.remove(name));
+  void _removeFolder(String id) async {
+    final folder = _sharedFolders[id];
+    if (folder == null) return;
+
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Xác nhận xóa"),
+        content: Text(
+          "Bạn có chắc chắn muốn ngừng chia sẻ thư mục '${folder.name}'? Link này sẽ không thể truy cập được nữa.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Hủy", style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text("Xóa"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      final folderData = _sharedFolders[id];
+      if (folderData != null) {
+        folderData.outSub?.cancel();
+        folderData.errSub?.cancel();
+        folderData.process?.kill();
+      }
+      setState(() => _sharedFolders.remove(id));
+      _saveFolders();
+    }
   }
 
   ContentType _getContentType(String path) {
     final ext = p.extension(path).toLowerCase();
-    if (ext == '.html') return ContentType.html;
     if (ext == '.png') return ContentType('image', 'png');
     if (ext == '.jpg' || ext == '.jpeg') return ContentType('image', 'jpeg');
     return ContentType.binary;
   }
 
-  Future<void> _stopEverything({bool clearFolders = true}) async {
-    _shouldRestart = false;
-    await _tunnelOutSub?.cancel();
-    await _tunnelErrSub?.cancel();
-    _tunnelProcess?.kill();
-    _tunnelProcess = null;
-    await _server?.close(force: true);
-    _server = null;
-
+  Future<void> _stopEverything({bool clearFolders = false}) async {
+    for (final folder in _sharedFolders.values) {
+      folder.outSub?.cancel();
+      folder.errSub?.cancel();
+      folder.process?.kill();
+      folder.process = null;
+      folder.isConnecting = false;
+    }
+    _mainTunnelProcess?.kill();
+    _mainTunnelProcess = null;
+    // We keep the _server (API Server) running to avoid "Socket Hang Up"
+    // only close if explicitly needed or during app shutdown.
+    // await _server?.close(force: true);
+    // _server = null;
     if (mounted) {
       setState(() {
         _isRunning = false;
         _isConnecting = false;
         if (clearFolders) _sharedFolders.clear();
-        _tunnelUrl = null;
       });
       _updateTrayMenu();
     }
@@ -590,49 +698,296 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F2F7),
-      appBar: AppBar(
-        title: const Text("Shotpik Tunnel Multi-Share"),
-        elevation: 0,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          children: [
-            StatusConfigCard(
-              isRunning: _isRunning,
-              isConnecting: _isConnecting,
-              statusMessage: _statusMessage,
-              onToggleTunnel: _handleTunnelToggle,
-              authToken: _authManager.authToken,
-              userData: _authManager.userData,
-              onLogout: _authManager.logout,
-              onLoginWeb: _authManager.loginWeb,
-              tunnelUrl: _tunnelUrl,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      body: Row(
+        children: [
+          _buildSidebar(context),
+          Expanded(
+            child: Column(
+              children: [
+                _buildTopBar(context),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      spacing: 20,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        StatusConfigCard(
+                          isRunning: _isRunning,
+                          isConnecting: _isConnecting,
+                          statusMessage: _statusMessage,
+                          onToggleTunnel: _handleTunnelToggle,
+                          tunnelUrl: _mainTunnelUrl,
+                          initialToken: _mainTunnelToken,
+                          onSaveToken: (token) {
+                            setState(() => _mainTunnelToken = token);
+                            _saveFolders();
+                            _startEverything();
+                          },
+                        ),
+                        if (_error != null) _buildErrorCard(),
+                        Expanded(
+                          flex: 3,
+                          child: FolderListCard(
+                            isRunning: _isRunning,
+                            sharedFolders: _sharedFolders,
+                            apiToken: _authManager.authToken ?? '',
+                            onAddFolder: _startSharing,
+                            onRemoveFolder: _removeFolder,
+                          ),
+                        ),
+                        // if (kDebugMode)
+                        //   Expanded(
+                        //     child: DebugLogView(
+                        //       logs: _logs,
+                        //       scrollController: _scroll,
+                        //       onClearLogs: () => setState(() => _logs.clear()),
+                        //     ),
+                        //   ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 10),
-                child: Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 11)),
-              ),
-            const SizedBox(height: 20),
-            FolderListCard(
-              isRunning: _isRunning,
-              sharedFolders: _sharedFolders,
-              tunnelUrl: _tunnelUrl,
-              apiToken: _apiToken,
-              onAddFolder: _startSharing,
-              onRemoveFolder: _removeFolder,
-            ),
-            if (kDebugMode)
-              DebugLogView(
-                logs: _logs,
-                scrollController: _scroll,
-                onClearLogs: () => setState(() => _logs.clear()),
-              ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
+
+  Widget _buildErrorCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.red.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.red.shade100),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.error_outline_rounded,
+            size: 16,
+            color: Colors.red.shade700,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              _error!,
+              style: TextStyle(
+                color: Colors.red.shade700,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSidebar(BuildContext context) {
+    return Container(
+      width: 260,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          right: BorderSide(
+            color: Theme.of(context).dividerColor.withValues(alpha: 0.05),
+          ),
+        ),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(32.0),
+            child: Row(
+              children: [
+                Image.asset('assets/shotpik-agent.png', width: 40, height: 40),
+                const SizedBox(width: 16),
+                Text(
+                  "Shotpik",
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -0.5,
+                    color: Theme.of(context).colorScheme.onSurface,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _buildNavSection(context, "MENU"),
+          _buildNavItem(context, Icons.dashboard_rounded, "Dashboard", true),
+          _buildNavItem(
+            context,
+            Icons.history_rounded,
+            "Shared History",
+            false,
+          ),
+          _buildNavItem(context, Icons.settings_outlined, "Settings", false),
+          const Spacer(),
+          _buildUserCard(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNavSection(BuildContext context, String title) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+    child: Text(
+      title,
+      style: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.bold,
+        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
+        letterSpacing: 1.2,
+      ),
+    ),
+  );
+
+  Widget _buildNavItem(
+    BuildContext context,
+    IconData icon,
+    String label,
+    bool active,
+  ) => Container(
+    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+    child: ListTile(
+      leading: Icon(
+        icon,
+        size: 20,
+        color: active
+            ? Theme.of(context).colorScheme.primary
+            : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+      ),
+      title: Text(
+        label,
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: active ? FontWeight.bold : FontWeight.w500,
+          color: active
+              ? Theme.of(context).colorScheme.onSurface
+              : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+        ),
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      selected: active,
+      selectedTileColor: Theme.of(
+        context,
+      ).colorScheme.primary.withValues(alpha: 0.1),
+      onTap: () {},
+    ),
+  );
+
+  Widget _buildUserCard(BuildContext context) => Container(
+    margin: const EdgeInsets.all(16),
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(20),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.03),
+          blurRadius: 10,
+          offset: const Offset(0, 4),
+        ),
+      ],
+    ),
+    child: Row(
+      children: [
+        CircleAvatar(
+          radius: 18,
+          backgroundColor: Theme.of(
+            context,
+          ).colorScheme.primary.withValues(alpha: 0.1),
+          child: Icon(
+            Icons.person_rounded,
+            size: 18,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _authManager.userName ?? "User",
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
+              ),
+              Text(
+                _authManager.userEmail!,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.onSurface.withValues(alpha: 0.5),
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+        IconButton(
+          icon: Icon(
+            Icons.logout_rounded,
+            size: 18,
+            color: Theme.of(
+              context,
+            ).colorScheme.onSurface.withValues(alpha: 0.4),
+          ),
+          onPressed: () => _authManager.logout(),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildTopBar(BuildContext context) => Container(
+    height: 80,
+    padding: const EdgeInsets.symmetric(horizontal: 32),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      border: Border(
+        bottom: BorderSide(
+          color: Theme.of(context).dividerColor.withValues(alpha: 0.05),
+        ),
+      ),
+    ),
+    child: Row(
+      children: [
+        Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              "Tunnel Dashboard",
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+            Text(
+              "Manage your secure album shares",
+              style: TextStyle(
+                fontSize: 13,
+                color: Theme.of(
+                  context,
+                ).colorScheme.onSurface.withValues(alpha: 0.5),
+              ),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
 }

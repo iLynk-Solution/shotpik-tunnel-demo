@@ -10,10 +10,13 @@ class AuthManager extends ChangeNotifier {
   Map<String, dynamic>? _userData;
   final _appLinks = AppLinks();
   StreamSubscription? _linkSubscription;
+  Uri? _lastProcessedUri; // To prevent processing 'sticky' initial links
 
   String? get authToken => _authToken;
   Map<String, dynamic>? get userData => _userData;
   bool get isAuthenticated => _authToken != null && !JwtDecoder.isExpired(_authToken!);
+  String? get userEmail => _userData?['email'] as String?;
+  String? get userName => _userData?['name'] as String?;
 
   AuthManager() {
     _initDeepLinks();
@@ -22,14 +25,19 @@ class AuthManager extends ChangeNotifier {
   Future<void> loadSavedSession() async {
     final prefs = await SharedPreferences.getInstance();
     final savedToken = prefs.getString('auth_token');
+    debugPrint("AUTH_MANAGER: Loading saved session... Found token: ${savedToken != null}");
+    
     if (savedToken != null && !JwtDecoder.isExpired(savedToken)) {
       _authToken = savedToken;
       try {
         _userData = JwtDecoder.decode(savedToken);
+        debugPrint("AUTH_MANAGER: Session restored for: ${userEmail ?? 'Unknown'}");
       } catch (e) {
-        debugPrint("Error decoding saved token: $e");
+        debugPrint("AUTH_MANAGER: Error decoding saved token: $e");
       }
       notifyListeners();
+    } else {
+      debugPrint("AUTH_MANAGER: No valid saved session found.");
     }
   }
 
@@ -48,11 +56,16 @@ class AuthManager extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    debugPrint("AUTH_MANAGER: Logging out...");
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('auth_token');
+    
     _authToken = null;
     _userData = null;
+    _lastProcessedUri = null; // Clear this so a new login can happen
+    
     notifyListeners();
+    debugPrint("AUTH_MANAGER: Logout complete.");
   }
 
   void _initDeepLinks() {
@@ -69,20 +82,33 @@ class AuthManager extends ChangeNotifier {
   void _handleIncomingLink(Uri? uri) {
     if (uri == null) return;
 
+    // Prevent processing the exact same URI multiple times (Sticky link issue on macOS)
+    if (_lastProcessedUri == uri) {
+      debugPrint("AUTH_MANAGER: Ignoring duplicate deep link (sticky): $uri");
+      return;
+    }
+    _lastProcessedUri = uri;
+
+    debugPrint("AUTH_MANAGER: Handling incoming link: $uri");
+
     bool isAuthLink = (uri.scheme == 'tunnel' && uri.host == 'auth') ||
         (uri.scheme == 'https' && uri.host == 'shotpik.com' && uri.path == '/auth');
 
     if (isAuthLink) {
       final token = uri.queryParameters['token'];
       if (token != null) {
+        debugPrint("AUTH_MANAGER: Valid token received from deep link.");
         _saveToken(token);
         _authToken = token;
         try {
           _userData = JwtDecoder.decode(token);
+          debugPrint("AUTH_MANAGER: Login successful for: ${userEmail ?? 'Unknown'}");
         } catch (e) {
-          debugPrint("Error decoding token: $e");
+          debugPrint("AUTH_MANAGER: Error decoding token: $e");
         }
         notifyListeners();
+      } else {
+        debugPrint("AUTH_MANAGER: Deep link received but no token found.");
       }
     }
   }

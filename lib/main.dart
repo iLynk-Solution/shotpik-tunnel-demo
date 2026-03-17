@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 import 'features/tunnel/presentation/pages/tunnel_page.dart';
+import 'features/auth/logic/auth_manager.dart';
+import 'features/auth/presentation/pages/login_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,15 +18,22 @@ void main() async {
     () async {
       await windowManager.show();
       await windowManager.focus();
-      await windowManager.setPreventClose(true); // QUAN TRỌNG: Ngăn chặn thoát App khi bấm X
+      await windowManager.setPreventClose(
+        true,
+      ); // QUAN TRỌNG: Ngăn chặn thoát App khi bấm X
     },
   );
 
-  runApp(const TunnelInternalApp());
+  final authManager = AuthManager();
+  await authManager.loadSavedSession();
+
+  runApp(TunnelInternalApp(authManager: authManager));
 }
 
 class TunnelInternalApp extends StatelessWidget {
-  const TunnelInternalApp({super.key});
+  final AuthManager authManager;
+
+  const TunnelInternalApp({super.key, required this.authManager});
 
   @override
   Widget build(BuildContext context) {
@@ -33,8 +42,27 @@ class TunnelInternalApp extends StatelessWidget {
       theme: ThemeData(
         fontFamily: 'Geomanist',
         useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFFD93232),
+          brightness: Brightness.light,
+        ).copyWith(
+          primary: const Color(0xFFD93232),
+          onPrimary: Colors.white,
+          surface: Colors.white,
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF8F9FD),
       ),
-      home: const TunnelHome(),
+      themeMode: ThemeMode.light,
+      home: ListenableBuilder(
+        listenable: authManager,
+        builder: (context, child) {
+          if (authManager.isAuthenticated) {
+            return TunnelHome(authManager: authManager);
+          } else {
+            return LoginPage(authManager: authManager);
+          }
+        },
+      ),
     );
   }
 }
