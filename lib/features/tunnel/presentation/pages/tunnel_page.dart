@@ -42,8 +42,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
   int? _currentPort;
   String? _mainTunnelUrl;
-  String? _mainTunnelToken;
   Process? _mainTunnelProcess;
+  final Set<String> _whitelist = {};
 
   static const int _namedTunnelPort = 8888;
 
@@ -57,20 +57,24 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     initSystemTray();
     _authManager.addListener(_onAuthChanged);
     _loadFolders();
-    
-    // Auto-start local server on app launch
-    _startServer(bindPort: _namedTunnelPort).then((port) {
-      _currentPort = port;
-      setState(() => _isRunning = true);
-    }).catchError((e) {
-      log("API Server failed to start: $e");
-      setState(() => _error = "API Port $_namedTunnelPort is already in use or blocked.");
-    });
+
+    // Auto-start local server on app launch (Safe: No Cloudflare calls here)
+    _startServer(bindPort: _namedTunnelPort)
+        .then((port) {
+          _currentPort = port;
+          setState(() {
+            _isRunning = true;
+            _statusMessage = "Local API Active (Tunnel Manual)";
+          });
+        })
+        .catchError((e) {
+          log("API Server failed to start: $e");
+          setState(() => _error = "API Port $_namedTunnelPort is busy.");
+        });
   }
 
   Future<void> _loadFolders() async {
     final prefs = await SharedPreferences.getInstance();
-    _mainTunnelToken = prefs.getString('main_tunnel_token');
     _mainTunnelUrl = prefs.getString('main_tunnel_url');
 
     final List<String>? folderList = prefs.getStringList('shared_folders');
@@ -80,14 +84,21 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
           try {
             final data = jsonDecode(item);
             final name = data['name'] as String;
-            final nameUrl = data['nameUrl']?.toString() ?? name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_');
+            final namePath =
+                data['name_path']?.toString() ??
+                data['nameUrl']?.toString() ??
+                name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_');
             final path = data['path'] as String;
             final id = data['id']?.toString() ?? _generateUuid();
+            final createdAtStr = data['created_at']?.toString();
+            final createdAt = createdAtStr != null ? DateTime.tryParse(createdAtStr) : null;
+            
             _sharedFolders[id] = SharedFolderData(
               id: id,
               name: name,
-              nameUrl: nameUrl,
+              namePath: namePath,
               localPath: path,
+              createdAt: createdAt,
               tunnelUrl: data['url']?.toString(), // Restore previous URL
             );
           } catch (e) {
@@ -97,28 +108,35 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       });
     }
 
-    // Auto-start everything if we have a token or previous folders
-    if (_sharedFolders.isNotEmpty || _mainTunnelToken != null) {
-      _startEverything();
+     // Load Whitelist
+    final List<String>? whitelist = prefs.getStringList('whitelist');
+    if (whitelist != null) {
+      _whitelist.clear();
+      _whitelist.addAll(whitelist);
     }
+
+    // Initial status info
+    setState(() {
+      _statusMessage ??= "Local API Ready";
+    });
   }
 
   Future<void> _saveFolders() async {
     final prefs = await SharedPreferences.getInstance();
-    if (_mainTunnelToken != null) {
-      await prefs.setString('main_tunnel_token', _mainTunnelToken!);
-    }
     if (_mainTunnelUrl != null) {
       await prefs.setString('main_tunnel_url', _mainTunnelUrl!);
     }
+    
+    await prefs.setStringList('whitelist', _whitelist.toList());
 
     final List<String> folderList = _sharedFolders.values.map((f) {
       return jsonEncode({
-        'id': f.id, 
-        'name': f.name, 
-        'nameUrl': f.nameUrl,
+        'id': f.id,
+        'name': f.name,
+        'name_path': f.namePath,
         'path': f.localPath,
         'url': f.tunnelUrl, // Persist the URL too
+        'created_at': f.createdAt.toIso8601String(),
       });
     }).toList();
     await prefs.setStringList('shared_folders', folderList);
@@ -132,7 +150,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   void dispose() {
     windowManager.removeListener(this);
     _authManager.removeListener(_onAuthChanged);
-    _stopEverything();
+    _stopEverything(isDisposing: true);
+    _server?.close(force: true);
     _scroll.dispose();
     super.dispose();
   }
@@ -197,7 +216,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
   String _generateUuid() {
     final random = Random();
-    String generateByte() => random.nextInt(256).toRadixString(16).padLeft(2, '0');
+    String generateByte() =>
+        random.nextInt(256).toRadixString(16).padLeft(2, '0');
     return '${generateByte()}${generateByte()}${generateByte()}${generateByte()}-'
         '${generateByte()}${generateByte()}-'
         '4${generateByte().substring(1)}-'
@@ -208,9 +228,13 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   Future<int> _startServer({int bindPort = 0}) async {
     await _server?.close(force: true);
     try {
-      _server = await HttpServer.bind(InternetAddress.loopbackIPv4, bindPort, shared: true);
+      _server = await HttpServer.bind(
+        InternetAddress.anyIPv4,
+        bindPort,
+        shared: true,
+      );
       final port = _server!.port;
-      log("API SERVER STARTED: http://127.0.0.1:$port");
+      log("API SERVER STARTED: http://0.0.0.0:$port");
       log("Use this address for LOCAL API calls.");
 
       _server!.listen((HttpRequest request) async {
@@ -219,6 +243,9 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             HttpHeaders.authorizationHeader,
           );
           final urlToken = request.uri.queryParameters['token'];
+          final hostHeader = request.headers.value(
+            HttpHeaders.hostHeader,
+          ); // e.g., "my-album-name"
           bool isAuthorized = false;
           final currentApiToken = _authManager.authToken;
 
@@ -227,45 +254,60 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
           }
           if (urlToken == currentApiToken) isAuthorized = true;
 
-          if (!isAuthorized) {
-            request.response.statusCode = HttpStatus.forbidden;
-            request.response.write('403 Forbidden: Token không hợp lệ.');
-            await request.response.close();
-            return;
-          }
-
           final requestPath = Uri.decodeComponent(request.uri.path);
-          log("--> ${request.method} $requestPath");
+          log("--> ${request.method} $requestPath (Host: $hostHeader)");
 
           final apiService = TunnelApiService(
             sharedFolders: _sharedFolders,
+            whitelist: _whitelist,
+            mainTunnelUrl: _mainTunnelUrl,
             onLog: log,
-            onAddFolder: (id, name, nameUrl, path) async {
+            onAddFolder: (id, name, namePath, path) async {
               if (!Directory(path).existsSync()) {
                 return "Error: Local path does not exist: $path";
               }
               setState(() {
                 _sharedFolders[id] = SharedFolderData(
                   id: id,
-                  name: name, 
-                  nameUrl: nameUrl,
+                  name: name,
+                  namePath: namePath,
                   localPath: path,
                 );
               });
               _saveFolders();
               return await _startTunnelForFolder(id);
             },
-            onStartService: _startEverything,
-            onUpdateConfig: (token) async {
+            onRemoveFolder: (id) async {
+              final folderData = _sharedFolders[id];
+              if (folderData != null) {
+                folderData.outSub?.cancel();
+                folderData.errSub?.cancel();
+                folderData.process?.kill();
+                setState(() => _sharedFolders.remove(id));
+                _saveFolders();
+              }
+            },
+            onUpdateWhitelist: (paths) async {
               setState(() {
-                _mainTunnelToken = token;
+                _whitelist.clear();
+                _whitelist.addAll(paths);
               });
               await _saveFolders();
-              await _startEverything(); // Restart to apply new token
+            },
+            onStartService: _startEverything,
+            onRefreshTunnel: (id) async {
+              await _startTunnelForFolder(id);
             },
           );
 
+          // Handle API requests (Always need Auth)
           if (requestPath.startsWith('/api/v1/')) {
+            if (!isAuthorized) {
+              request.response.statusCode = HttpStatus.forbidden;
+              request.response.write('403 Forbidden: Token không hợp lệ.');
+              await request.response.close();
+              return;
+            }
             await apiService.handleRequest(request);
             return;
           }
@@ -274,51 +316,107 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
               .split('/')
               .where((s) => s.isNotEmpty)
               .toList();
-          if (pathSegments.isEmpty) {
-            request.response.statusCode = HttpStatus.notFound;
-            request.response.write('404 Not Found');
-            return;
+
+          SharedFolderData? folderData;
+
+          // 1. Identify folder by matching the random domain from Host Header
+          if (hostHeader != null && hostHeader.isNotEmpty) {
+            final hostOnly = hostHeader.split(':')[0].toLowerCase();
+
+            // First, check if it's the main tunnel for API Gateway
+            bool isMainTunnel = false;
+            if (_mainTunnelUrl != null && _mainTunnelUrl!.contains(hostOnly)) {
+              isMainTunnel = true;
+            }
+
+            if (!isMainTunnel) {
+              for (var f in _sharedFolders.values) {
+                if (f.tunnelUrl != null && f.tunnelUrl!.contains(hostOnly)) {
+                  folderData = f;
+                  break;
+                }
+              }
+            }
           }
 
-          final virtualName = pathSegments[0];
-          SharedFolderData? folderData = _sharedFolders[virtualName]; // Try ID first
-
-          if (folderData == null) {
-            // Try searching by nameUrl (Unique identifier)
-            for (var f in _sharedFolders.values) {
-              if (f.nameUrl == virtualName) {
-                folderData = f;
-                break;
+          // 2. Fallback to URL path segment (for local access)
+          if (folderData == null && pathSegments.isNotEmpty) {
+            final virtualName = pathSegments[0];
+            folderData = _sharedFolders[virtualName];
+            if (folderData == null) {
+              for (var f in _sharedFolders.values) {
+                if (f.namePath == virtualName || f.name == virtualName) {
+                  folderData = f;
+                  break;
+                }
               }
             }
           }
 
           if (folderData == null) {
-            // Try searching by name (Legacy)
-            for (var f in _sharedFolders.values) {
-              if (f.name == virtualName) {
-                folderData = f;
-                break;
-              }
+            // Check if it's the main tunnel (API gateway) but no subpath
+            bool isMain = _mainTunnelUrl != null && hostHeader != null && 
+                          _mainTunnelUrl!.contains(hostHeader.split(':')[0]);
+            
+            if (isMain && pathSegments.isEmpty) {
+              request.response.statusCode = HttpStatus.ok;
+              request.response.write('API Gateway Online');
+              await request.response.close();
+              return;
             }
-          }
 
-          if (folderData == null) {
             request.response.statusCode = HttpStatus.notFound;
-            request.response.write('404 Not Found: Folder not shared.');
+            request.response.write(
+              '404 Not Found: Album not found or link expired.',
+            );
+            await request.response.close();
             return;
           }
-          final subPath = p.joinAll(pathSegments.sublist(1));
+
+          // Resolve subPath within the folder
+          String subPath = "";
+          final hostOnly = hostHeader?.split(':')[0].toLowerCase();
+          bool matchedByDomain = hostOnly != null && folderData.tunnelUrl != null && 
+                                 folderData.tunnelUrl!.contains(hostOnly);
+
+          if (matchedByDomain) {
+            subPath = requestPath;
+          } else if (pathSegments.isNotEmpty) {
+            subPath = p.joinAll(pathSegments.sublist(1));
+          }
+          
+          // Strip leading slashes
+          while (subPath.startsWith('/')) {
+            subPath = subPath.substring(1);
+          }
+          
           final fullPath = p.join(folderData.localPath, subPath);
-
           final entityType = FileSystemEntity.typeSync(fullPath);
-          if (entityType == FileSystemEntityType.file) {
+          final bool isFileRequest = entityType == FileSystemEntityType.file;
+
+          // AUTH CHECK: 
+          // Bypass ONLY for FILES if folder namePath is in whitelist.
+          // Folders (directory listing) ALWAYS REQUIRE Authorization.
+          bool canAccess = isAuthorized || (isFileRequest && _whitelist.contains(folderData.namePath));
+
+          if (!canAccess) {
+            request.response.statusCode = HttpStatus.forbidden;
+            request.response.write('403 Forbidden: Token không hợp lệ hoặc không có quyền truy cập thư mục.');
+            await request.response.close();
+            return;
+          }
+
+          log("Matched: ${folderData.name} - File: $isFileRequest - Auth Bypassed: ${!isAuthorized}");
+
+          if (isFileRequest) {
             final file = File(fullPath);
             request.response.headers.contentType = _getContentType(fullPath);
             await request.response.addStream(file.openRead());
           } else if (entityType == FileSystemEntityType.directory) {
             if (!request.uri.path.endsWith('/')) {
-              await request.response.redirect(Uri.parse('${request.uri.path}/'));
+              await request.response.redirect(
+                Uri.parse('${request.uri.path}/'),
+              );
               return;
             }
             await _renderFolderContent(request, folderData, pathSegments);
@@ -403,22 +501,16 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         final port = await _startServer(bindPort: _namedTunnelPort);
         _currentPort = port;
       }
-      
+
       setState(() {
         _isRunning = true;
         _statusMessage = 'Service Ready';
       });
-      
+
       _startMainTunnel(); // Start primary API tunnel
 
-      // Activate all folders
-      for (var folderId in _sharedFolders.keys) {
-        if (_mainTunnelToken == null || _mainTunnelToken!.isEmpty) {
-          // If using Quick Tunnels, add delay to avoid 429
-          await Future.delayed(const Duration(seconds: 2));
-        }
-        _startTunnelForFolder(folderId);
-      }
+      // We do NOT auto-start all folder tunnels here anymore to avoid 429
+      // They will start when needed or manually.
       _updateTrayMenu();
     } catch (e) {
       setState(() {
@@ -434,7 +526,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     String cloudflaredPath;
     if (Platform.isMacOS) {
       final appDir = File(exePath).parent.parent.path;
-      cloudflaredPath = "$appDir/Frameworks/App.framework/Resources/flutter_assets/assets/bin/cloudflared";
+      cloudflaredPath =
+          "$appDir/Frameworks/App.framework/Resources/flutter_assets/assets/bin/cloudflared";
     } else {
       final appDir = File(exePath).parent.path;
       cloudflaredPath = "$appDir/data/flutter_assets/assets/bin/cloudflared";
@@ -450,15 +543,9 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     final List<String> args = [
       'tunnel',
       '--no-autoupdate',
-      '--protocol',
-      'http2',
+      '--url',
+      'http://localhost:$_currentPort',
     ];
-
-    if (_mainTunnelToken != null && _mainTunnelToken!.isNotEmpty) {
-      args.addAll(['run', '--token', _mainTunnelToken!]);
-    } else {
-      args.addAll(['--url', 'http://127.0.0.1:$_currentPort']);
-    }
 
     _mainTunnelProcess = await Process.start(cloudflaredPath, args);
 
@@ -472,9 +559,22 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
   void _processMainTunnelLog(String data) {
     log("[GATEWAY] $data");
-    
+
+    if (data.contains("429 Too Many Requests") ||
+        data.contains("error code: 1015")) {
+      setState(() {
+        _error = "Cloudflare Rate Limit: Vui lòng đợi 5-10 phút rồi thử lại.";
+        _isConnecting = false;
+        _isRunning = false;
+      });
+      _mainTunnelProcess?.kill();
+      return;
+    }
+
     // Check for random trycloudflare URL
-    final match = RegExp(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com').firstMatch(data);
+    final match = RegExp(
+      r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com',
+    ).firstMatch(data);
     if (match != null) {
       setState(() {
         _mainTunnelUrl = match.group(0);
@@ -482,15 +582,6 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         _saveFolders();
       });
       return;
-    }
-
-    // Check for named tunnel success (if using token)
-    if (_mainTunnelToken != null && (data.contains("Registered tunnel") || data.contains("Connection") && data.contains("established"))) {
-      setState(() {
-        _mainTunnelUrl = "https://shotpik-tunnel.tuyendev.store";
-        _isConnecting = false;
-        _saveFolders();
-      });
     }
   }
 
@@ -500,83 +591,72 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     final folderData = _sharedFolders[folderName];
     if (folderData == null) return "Error: Folder not found";
 
-    if (folderData.tunnelUrl != null) {
-      return folderData.tunnelUrl;
-    }
-
-    // If we have a main domain token, we DON'T start sub-tunnels.
-    // We just return the main URL with the folder name as the path.
-    if (_mainTunnelToken != null && _mainTunnelToken!.isNotEmpty) {
-      final baseUrl = _mainTunnelUrl ?? "https://shotpik-tunnel.tuyendev.store";
-      final albumUrl = "$baseUrl/${Uri.encodeComponent(folderData.nameUrl)}/";
-      setState(() {
-        folderData.tunnelUrl = albumUrl; // Store FULL URL
-        folderData.isConnecting = false;
-      });
-      return albumUrl;
-    }
-
-    // Capture existing completer if one is already running
-    if (_tunnelCompleters.containsKey(folderName)) {
-      return _tunnelCompleters[folderName]!.future;
-    }
-
-    // If a process exists but no URL, maybe it's stuck or just starting.
-    // For simplicity, if no process, start it.
-    if (folderData.process == null) {
-      final String exePath = Platform.resolvedExecutable;
-      String cloudflaredPath;
-      if (Platform.isMacOS) {
-        final appDir = File(exePath).parent.parent.path;
-        cloudflaredPath =
-            "$appDir/Frameworks/App.framework/Resources/flutter_assets/assets/bin/cloudflared";
-      } else {
-        final appDir = File(exePath).parent.path;
-        cloudflaredPath = "$appDir/data/flutter_assets/assets/bin/cloudflared";
-        if (Platform.isWindows) cloudflaredPath += ".exe";
+    // If we already have a process running, just return the current URL or future
+    if (folderData.process != null) {
+      if (folderData.tunnelUrl != null) {
+        return folderData.tunnelUrl;
       }
-
-      if (!File(cloudflaredPath).existsSync()) {
-        final altAppDir = File(exePath).parent.parent.parent.path;
-        final altPath = "$altAppDir/Resources/bin/cloudflared";
-        if (File(altPath).existsSync()) {
-          cloudflaredPath = altPath;
-        } else {
-          return "Error: cloudflared missing";
-        }
+      if (_tunnelCompleters.containsKey(folderName)) {
+        return _tunnelCompleters[folderName]!.future;
       }
-
-      if (!Platform.isWindows) {
-        await Process.run('chmod', ['+x', cloudflaredPath]);
-      }
-
-      final process = await Process.start(cloudflaredPath, [
-        'tunnel',
-        '--no-autoupdate',
-        '--protocol',
-        'http2',
-        '--url',
-        'http://127.0.0.1:$_currentPort',
-      ]);
-
-      folderData.process = process;
-      folderData.outSub = process.stdout
-          .transform(SystemEncoding().decoder)
-          .listen((data) => _processFolderTunnelLog(folderName, data));
-      folderData.errSub = process.stderr
-          .transform(SystemEncoding().decoder)
-          .listen((data) => _processFolderTunnelLog(folderName, data));
     }
+
+    // Stop existing process if any before starting new one (Regenerate)
+    folderData.outSub?.cancel();
+    folderData.errSub?.cancel();
+    folderData.process?.kill();
+    folderData.process = null;
+
+    setState(() {
+      folderData.isConnecting = true;
+      folderData.tunnelUrl = null;
+    });
+
+    final String exePath = Platform.resolvedExecutable;
+    String cloudflaredPath;
+    if (Platform.isMacOS) {
+      final appDir = File(exePath).parent.parent.path;
+      cloudflaredPath =
+          "$appDir/Frameworks/App.framework/Resources/flutter_assets/assets/bin/cloudflared";
+    } else {
+      final appDir = File(exePath).parent.path;
+      cloudflaredPath = "$appDir/data/flutter_assets/assets/bin/cloudflared";
+      if (Platform.isWindows) cloudflaredPath += ".exe";
+    }
+
+    if (!File(cloudflaredPath).existsSync()) {
+      setState(() => folderData.isConnecting = false);
+      return "Error: cloudflared missing";
+    }
+
+    if (!Platform.isWindows) {
+      await Process.run('chmod', ['+x', cloudflaredPath]);
+    }
+
+    final process = await Process.start(cloudflaredPath, [
+      'tunnel',
+      '--no-autoupdate',
+      '--url',
+      'http://127.0.0.1:$_currentPort',
+    ]);
+
+    folderData.process = process;
+    folderData.outSub = process.stdout
+        .transform(SystemEncoding().decoder)
+        .listen((data) => _processFolderTunnelLog(folderName, data));
+    folderData.errSub = process.stderr
+        .transform(SystemEncoding().decoder)
+        .listen((data) => _processFolderTunnelLog(folderName, data));
 
     final completer = Completer<String>();
     _tunnelCompleters[folderName] = completer;
 
-    // Timeout after 15 seconds if no URL found
     return completer.future.timeout(
-      const Duration(seconds: 15),
+      const Duration(seconds: 20),
       onTimeout: () {
         _tunnelCompleters.remove(folderName);
-        return "Pending (Starting...)";
+        if (mounted) setState(() => folderData.isConnecting = false);
+        return "Timeout (Cloudflare Busy)";
       },
     );
   }
@@ -585,18 +665,31 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     log("[$folderName] $data");
     final folderData = _sharedFolders[folderName];
     if (folderData == null) return;
+
+    if (data.contains("429 Too Many Requests") ||
+        data.contains("error code: 1015")) {
+      if (mounted) {
+        setState(() {
+          folderData.isConnecting = false;
+          folderData.tunnelUrl = "IP bị giới hạn (Đợi 5p)";
+        });
+      }
+      _tunnelCompleters.remove(folderName)?.complete("Rate Limited");
+      return;
+    }
+
     final match = RegExp(
       r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com',
     ).firstMatch(data);
     if (match != null) {
       if (mounted) {
         final baseUrl = match.group(0)!;
-        final albumUrl = "$baseUrl/${Uri.encodeComponent(folderData.nameUrl)}/";
         setState(() {
-          folderData.tunnelUrl = albumUrl; // Store FULL URL
+          folderData.tunnelUrl = "$baseUrl/";
           folderData.isConnecting = false;
         });
-        _tunnelCompleters.remove(folderName)?.complete(albumUrl);
+        _saveFolders();
+        _tunnelCompleters.remove(folderName)?.complete("$baseUrl/");
       }
     }
   }
@@ -611,11 +704,11 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       final name = result['name'] as String;
       final path = result['path'] as String;
       final nameUrl = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_');
-      
+
       final newData = SharedFolderData(
         id: _generateUuid(),
-        name: name, 
-        nameUrl: nameUrl,
+        name: name,
+        namePath: nameUrl,
         localPath: path,
       );
       setState(() => _sharedFolders[newData.id] = newData);
@@ -671,7 +764,10 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     return ContentType.binary;
   }
 
-  Future<void> _stopEverything({bool clearFolders = false}) async {
+  Future<void> _stopEverything({
+    bool clearFolders = false,
+    bool isDisposing = false,
+  }) async {
     for (final folder in _sharedFolders.values) {
       folder.outSub?.cancel();
       folder.errSub?.cancel();
@@ -681,11 +777,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     }
     _mainTunnelProcess?.kill();
     _mainTunnelProcess = null;
-    // We keep the _server (API Server) running to avoid "Socket Hang Up"
-    // only close if explicitly needed or during app shutdown.
-    // await _server?.close(force: true);
-    // _server = null;
-    if (mounted) {
+
+    if (!isDisposing && mounted) {
       setState(() {
         _isRunning = false;
         _isConnecting = false;
@@ -719,12 +812,6 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                           statusMessage: _statusMessage,
                           onToggleTunnel: _handleTunnelToggle,
                           tunnelUrl: _mainTunnelUrl,
-                          initialToken: _mainTunnelToken,
-                          onSaveToken: (token) {
-                            setState(() => _mainTunnelToken = token);
-                            _saveFolders();
-                            _startEverything();
-                          },
                         ),
                         if (_error != null) _buildErrorCard(),
                         Expanded(
@@ -735,6 +822,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                             apiToken: _authManager.authToken ?? '',
                             onAddFolder: _startSharing,
                             onRemoveFolder: _removeFolder,
+                            onRefreshTunnel: _startTunnelForFolder,
                           ),
                         ),
                         // if (kDebugMode)

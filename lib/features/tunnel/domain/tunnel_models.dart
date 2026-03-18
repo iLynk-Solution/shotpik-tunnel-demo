@@ -4,8 +4,9 @@ import 'dart:io';
 class SharedFolderData {
   final String id;
   final String name;
-  final String nameUrl;
+  final String namePath;
   final String localPath;
+  final DateTime createdAt;
   String? tunnelUrl;
   Process? process;
   bool isConnecting;
@@ -15,10 +16,11 @@ class SharedFolderData {
   SharedFolderData({
     required this.id,
     required this.name,
-    required this.nameUrl,
+    required this.namePath,
     required this.localPath,
+    DateTime? createdAt,
     this.tunnelUrl,
     this.process,
     this.isConnecting = false,
-  });
+  }) : createdAt = createdAt ?? DateTime.now();
 }

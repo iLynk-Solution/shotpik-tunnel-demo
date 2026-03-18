@@ -24,6 +24,15 @@ class AuthManager extends ChangeNotifier {
 
   Future<void> loadSavedSession() async {
     final prefs = await SharedPreferences.getInstance();
+    
+    // 1. Load the last handled link to prevent 'sticky' auto-login
+    final lastLink = prefs.getString('last_handled_link');
+    if (lastLink != null) {
+      _lastProcessedUri = Uri.parse(lastLink);
+      debugPrint("AUTH_MANAGER: Restored last handled link from storage.");
+    }
+
+    // 2. Load the actual session token
     final savedToken = prefs.getString('auth_token');
     debugPrint("AUTH_MANAGER: Loading saved session... Found token: ${savedToken != null}");
     
@@ -88,6 +97,11 @@ class AuthManager extends ChangeNotifier {
       return;
     }
     _lastProcessedUri = uri;
+    
+    // Persist this URI so we remember it even after restart
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setString('last_handled_link', uri.toString());
+    });
 
     debugPrint("AUTH_MANAGER: Handling incoming link: $uri");
 

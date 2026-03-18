@@ -9,6 +9,7 @@ class FolderListCard extends StatelessWidget {
   final String? mainTunnelUrl;
   final VoidCallback onAddFolder;
   final Function(String) onRemoveFolder;
+  final Function(String) onRefreshTunnel;
 
   const FolderListCard({
     super.key,
@@ -18,6 +19,7 @@ class FolderListCard extends StatelessWidget {
     this.mainTunnelUrl,
     required this.onAddFolder,
     required this.onRemoveFolder,
+    required this.onRefreshTunnel,
   });
 
   @override
@@ -65,11 +67,11 @@ class FolderListCard extends StatelessWidget {
                   } else if (!isRunning) {
                     urlText = "Server Offline";
                   } else {
-                    urlText = "Tunnel Offline (Waiting)";
+                    urlText = "Tunnel Offline (Ready to Start)";
                   }
 
-                  // Force rebuild hasUrl logic to be true if we have main domain
-                  bool isAvailable = (mainTunnelUrl != null && isRunning) || (folder.tunnelUrl != null && !folder.isConnecting);
+                  // Force rebuild hasUrl logic
+                  bool isAvailable = (folder.tunnelUrl != null && !folder.isConnecting);
 
                   return _FolderItem(
                     folder: folder,
@@ -77,6 +79,7 @@ class FolderListCard extends StatelessWidget {
                     isRunning: isRunning,
                     isAvailable: isAvailable,
                     onRemove: () => onRemoveFolder(folder.id),
+                    onRefresh: () => onRefreshTunnel(folder.id),
                   );
                 },
               ),
@@ -166,6 +169,7 @@ class _FolderItem extends StatelessWidget {
   final bool isRunning;
   final bool isAvailable;
   final VoidCallback onRemove;
+  final VoidCallback onRefresh;
 
   const _FolderItem({
     required this.folder,
@@ -173,6 +177,7 @@ class _FolderItem extends StatelessWidget {
     required this.isRunning,
     required this.isAvailable,
     required this.onRemove,
+    required this.onRefresh,
   });
 
   @override
@@ -234,19 +239,35 @@ class _FolderItem extends StatelessWidget {
                   height: 16,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              else if (hasUrl)
-                const Icon(
-                  Icons.check_circle_rounded,
-                  size: 16,
-                  color: Colors.green,
-                )
-              else
-                const Icon(
-                  Icons.cloud_off_rounded,
-                  size: 16,
-                  color: Colors.grey,
+              else ...[
+                if (hasUrl)
+                  const Icon(
+                    Icons.check_circle_rounded,
+                    size: 16,
+                    color: Colors.green,
+                  )
+                else
+                  const Icon(
+                    Icons.cloud_off_rounded,
+                    size: 16,
+                    color: Colors.grey,
+                  ),
+                const SizedBox(width: 8),
+                
+                // Regenerate/Refresh Button
+                IconButton(
+                  onPressed: isRunning && !folder.isConnecting ? onRefresh : null,
+                  icon: Icon(
+                    folder.tunnelUrl == null ? Icons.play_arrow_rounded : Icons.refresh_rounded,
+                    size: 18,
+                    color: isRunning ? Theme.of(context).colorScheme.primary : Colors.grey,
+                  ),
+                  tooltip: folder.tunnelUrl == null ? "Bắt đầu Tunnel" : "Cấp lại link tunnel",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
                 ),
-              const SizedBox(width: 8),
+              ],
+              const SizedBox(width: 12),
               IconButton(
                 onPressed: onRemove,
                 icon: const Icon(

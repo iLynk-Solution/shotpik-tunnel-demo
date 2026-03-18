@@ -6,8 +6,6 @@ class StatusConfigCard extends StatelessWidget {
   final String? statusMessage;
   final VoidCallback onToggleTunnel;
   final String? tunnelUrl;
-  final String? initialToken;
-  final Function(String) onSaveToken;
 
   const StatusConfigCard({
     super.key,
@@ -16,8 +14,6 @@ class StatusConfigCard extends StatelessWidget {
     this.statusMessage,
     required this.onToggleTunnel,
     this.tunnelUrl,
-    this.initialToken,
-    required this.onSaveToken,
   });
 
   @override
@@ -48,13 +44,7 @@ class StatusConfigCard extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               _buildStatusIndicator(), 
-              Row(
-                children: [
-                  _buildTokenButton(context),
-                  const SizedBox(width: 8),
-                  _buildToggleButton(context),
-                ],
-              ),
+              _buildToggleButton(context),
             ],
           ),
           if (statusMessage != null && !isRunning) ...[
@@ -127,49 +117,6 @@ class StatusConfigCard extends StatelessWidget {
     );
   }
 
-  Widget _buildTokenButton(BuildContext context) {
-    String currentToken = initialToken ?? '';
-    bool hasToken = currentToken.isNotEmpty;
-
-    return IconButton(
-      onPressed: () {
-        final controller = TextEditingController(text: currentToken);
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text("Cloudflare Tunnel Token", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            content: TextField(
-              controller: controller,
-              maxLines: 4,
-              decoration: InputDecoration(
-                hintText: "Dán Token từ Cloudflare Dashboard vào đây...",
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                filled: true,
-                fillColor: Colors.grey.shade50,
-              ),
-              style: const TextStyle(fontSize: 12),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context), child: const Text("Hủy")),
-              ElevatedButton(
-                onPressed: () {
-                  onSaveToken(controller.text.trim());
-                  Navigator.pop(context);
-                },
-                child: const Text("Lưu & Restart"),
-              ),
-            ],
-          ),
-        );
-      },
-      icon: Icon(
-        hasToken ? Icons.vpn_key_rounded : Icons.vpn_key_outlined,
-        color: hasToken ? Colors.white : Colors.white60,
-        size: 20,
-      ),
-      tooltip: "Cấu hình Domain cố định",
-    );
-  }
 
   Widget _buildGatewayInfo() {
     return Container(
