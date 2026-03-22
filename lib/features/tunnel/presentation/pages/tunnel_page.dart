@@ -316,8 +316,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
           // --- RSA Signature Verification ---
           // Use the EXACT Public Key from assets/md/flow-authen.md
-          const publicKey =
-              "MIGeMA0GCSqGSIb3DQEBAQUAA4GMADCBiAKBgG1oJHc0YeN9EzTO69XWcBs95U7aQtCFvuzj8V5cSBI34x/gwtwsBkSahkh0faMzKVXFJjOl+vp46YzVlnq+W3A9Hn1FnxNe3raS0bLNx7Scz3KYM9+p9xv7cRrwzUx3rlm3QyJXGzhd3eKrHgOeVESsPr2xoRY8G/4E2qod9EJvAgMBAAE=";
+          const publicKey = "....";
 
           final String? signature = request.headers.value('X-Signature');
 
@@ -922,10 +921,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
       final response = await http.post(
         Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/refresh"),
-        headers: {
-          "Content-Type": "application/json",
-          "X-Signature": signature,
-        },
+        headers: {"Content-Type": "application/json", "X-Signature": signature},
         body: bodyData,
       );
 
