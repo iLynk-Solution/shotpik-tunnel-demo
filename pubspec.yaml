@@ -45,13 +45,16 @@ dependencies:
 
   url_launcher: ^6.2.5
   jwt_decoder: ^2.0.1
-  uni_links: ^0.5.1
   system_tray: ^2.0.3
   window_manager: ^0.4.3
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  encrypt: ^5.0.3
+  pointycastle: ^3.9.1
+  app_links: ^7.0.0
+  shared_preferences: ^2.5.4
 
 dev_dependencies:
   flutter_test:
@@ -102,5 +105,13 @@ flutter:
   #       - asset: fonts/TrajanPro_Bold.ttf
   #         weight: 700
   #
-  # For details regarding fonts from package dependencies,
-  # see https://flutter.dev/to/font-from-package
+  fonts:
+    - family: Geomanist
+      fonts:
+        - asset: assets/fonts/Geomanist/Geomanist-Regular.otf
+        - asset: assets/fonts/Geomanist/Geomanist-Book.otf
+          weight: 300
+        - asset: assets/fonts/Geomanist/Geomanist-Medium.otf
+          weight: 500
+        - asset: assets/fonts/Geomanist/Geomanist-Bold.otf
+          weight: 700
