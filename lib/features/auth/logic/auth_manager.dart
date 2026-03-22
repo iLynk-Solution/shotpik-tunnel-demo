@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:app_links/app_links.dart';
+import 'package:jwt_decoder/jwt_decoder.dart'; // Restore JWT decoder
 
 class AuthManager extends ChangeNotifier {
   String? _authToken;
@@ -14,12 +14,13 @@ class AuthManager extends ChangeNotifier {
 
   String? get authToken => _authToken;
   Map<String, dynamic>? get userData => _userData;
-  bool get isAuthenticated => _authToken != null && !JwtDecoder.isExpired(_authToken!);
-  String? get userEmail => _userData?['email'] as String?;
-  String? get userName => _userData?['name'] as String?;
+
+  bool get isAuthenticated {
+    return _authToken != null && _authToken!.isNotEmpty;
+  }
 
   AuthManager() {
-    _initDeepLinks();
+    // We don't call _initDeepLinks here because it's async and depends on loadSavedSession
   }
 
   Future<void> loadSavedSession() async {
@@ -32,22 +33,29 @@ class AuthManager extends ChangeNotifier {
       debugPrint("AUTH_MANAGER: Restored last handled link from storage.");
     }
 
-    // 2. Load the actual session token
+    // 2. Load the actual session token (Public Key)
     final savedToken = prefs.getString('auth_token');
     debugPrint("AUTH_MANAGER: Loading saved session... Found token: ${savedToken != null}");
-    
-    if (savedToken != null && !JwtDecoder.isExpired(savedToken)) {
+
+    if (savedToken != null) {
       _authToken = savedToken;
       try {
-        _userData = JwtDecoder.decode(savedToken);
-        debugPrint("AUTH_MANAGER: Session restored for: ${userEmail ?? 'Unknown'}");
+        if (!JwtDecoder.isExpired(savedToken)) {
+          _userData = JwtDecoder.decode(savedToken);
+          debugPrint("AUTH_MANAGER: User info restored from JWT.");
+        }
       } catch (e) {
-        debugPrint("AUTH_MANAGER: Error decoding saved token: $e");
+        debugPrint("AUTH_MANAGER: Token is not a JWT, using as raw token.");
       }
       notifyListeners();
+      debugPrint("AUTH_MANAGER: Session restored.");
     } else {
-      debugPrint("AUTH_MANAGER: No valid saved session found.");
+      debugPrint("AUTH_MANAGER: No saved session found.");
     }
+
+    // IMPORTANT: Only start listening to deep links AFTER loading the saved session
+    // to ensure _lastProcessedUri is correctly populated first.
+    _initDeepLinks();
   }
 
   Future<void> loginWeb() async {
@@ -68,13 +76,14 @@ class AuthManager extends ChangeNotifier {
     debugPrint("AUTH_MANAGER: Logging out...");
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('auth_token');
+    // We KEEP 'last_handled_link' in SharedPreferences to prevent 'sticky' re-login.
+    // We also KEEP it in _lastProcessedUri for this session.
     
     _authToken = null;
     _userData = null;
-    _lastProcessedUri = null; // Clear this so a new login can happen
     
     notifyListeners();
-    debugPrint("AUTH_MANAGER: Logout complete.");
+    debugPrint("AUTH_MANAGER: Logout complete (Saved link preserved to avoid auto-relogin).");
   }
 
   void _initDeepLinks() {
@@ -114,12 +123,16 @@ class AuthManager extends ChangeNotifier {
         debugPrint("AUTH_MANAGER: Valid token received from deep link.");
         _saveToken(token);
         _authToken = token;
+        
         try {
           _userData = JwtDecoder.decode(token);
-          debugPrint("AUTH_MANAGER: Login successful for: ${userEmail ?? 'Unknown'}");
+          debugPrint("AUTH_MANAGER: User info decoded: $_userData");
         } catch (e) {
-          debugPrint("AUTH_MANAGER: Error decoding token: $e");
+          debugPrint("AUTH_MANAGER: Received token is not a JWT, UI will show default user.");
+          _userData = null;
         }
+
+        debugPrint("AUTH_MANAGER: Login successful.");
         notifyListeners();
       } else {
         debugPrint("AUTH_MANAGER: Deep link received but no token found.");

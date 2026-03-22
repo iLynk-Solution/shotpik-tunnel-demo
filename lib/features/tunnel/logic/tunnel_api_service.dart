@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:path/path.dart' as p;
+import '../../../core/rsa_utils.dart';
 import '../domain/tunnel_models.dart';
 
 class TunnelApiService {
@@ -37,39 +38,46 @@ class TunnelApiService {
         '${generateByte()}${generateByte()}${generateByte()}${generateByte()}${generateByte()}${generateByte()}';
   }
 
-  Future<void> handleRequest(HttpRequest request) async {
+  Future<void> handleRequest(HttpRequest request, String bodyString) async {
     final requestPath = Uri.decodeComponent(request.uri.path);
+    onLog("Routing API: Method=${request.method}, Path=$requestPath");
     
-    // Handle CORS preflight
-    if (request.method == 'OPTIONS') {
-      _sendJsonResponse(request, {"success": true});
+    if (requestPath == '/api/v1/auth/verify') {
+      if (request.method != 'POST') return _sendMethodNotAllowed(request);
+      await _handleVerifyAuth(request);
       return;
     }
-    
+
+    if (requestPath == '/api/v1/auth/sign') {
+      if (request.method != 'POST') return _sendMethodNotAllowed(request);
+      await _handleSignAuth(request, bodyString);
+      return;
+    }
+
     if (requestPath == '/api/v1/files') {
       if (request.method != 'POST') return _sendMethodNotAllowed(request);
-      await _handleListFiles(request);
-    } else if (requestPath == '/api/v1/tunnel/create') {
+      await _handleListFiles(request, bodyString);
+    } else if (requestPath == '/api/v1/create-folder') {
       if (request.method != 'POST') return _sendMethodNotAllowed(request);
-      await _handleCreateTunnel(request);
+      await _handleCreateTunnel(request, bodyString);
     } else if (requestPath == '/api/v1/tunnel/list') {
-      if (request.method != 'GET') return _sendMethodNotAllowed(request);
+      if (request.method != 'POST') return _sendMethodNotAllowed(request);
       await _handleListTunnels(request);
-    } else if (requestPath == '/api/v1/tunnel/delete') {
-      if (request.method != 'DELETE' && request.method != 'POST') return _sendMethodNotAllowed(request);
-      await _handleDeleteTunnel(request);
     } else if (requestPath == '/api/v1/tunnel/refresh') {
       if (request.method != 'POST') return _sendMethodNotAllowed(request);
-      await _handleRefreshTunnel(request);
+      await _handleRefreshTunnel(request, bodyString);
+    } else if (requestPath == '/api/v1/tunnel/delete') {
+      if (request.method != 'POST' && request.method != 'DELETE') return _sendMethodNotAllowed(request);
+      await _handleDeleteTunnel(request, bodyString);
     } else if (requestPath == '/api/v1/whitelist') {
       if (request.method != 'GET') return _sendMethodNotAllowed(request);
       await _handleWhitelist(request);
     } else if (requestPath == '/api/v1/whitelist/add') {
       if (request.method != 'POST') return _sendMethodNotAllowed(request);
-      await _handleWhitelistAdd(request);
+      await _handleWhitelistAdd(request, bodyString);
     } else if (requestPath == '/api/v1/whitelist/delete') {
       if (request.method != 'DELETE' && request.method != 'POST') return _sendMethodNotAllowed(request);
-      await _handleWhitelistDelete(request);
+      await _handleWhitelistDelete(request, bodyString);
     } else if (requestPath == '/api/v1/whitelist/clear') {
       if (request.method != 'DELETE' && request.method != 'POST') return _sendMethodNotAllowed(request);
       await _handleWhitelistClear(request);
@@ -82,6 +90,19 @@ class TunnelApiService {
     } else {
       _sendJsonResponse(request, {"success": false, "message": "Endpoint not found"}, status: 404);
     }
+  }
+
+  Future<void> _handleVerifyAuth(HttpRequest request) async {
+    // If this handler is reached, it means the RSA Signature Verification in TunnelPage.dart has already passed.
+    _sendJsonResponse(request, {
+      "success": true,
+      "message": "RSA Signature is VALID!",
+      "details": {
+        "status": "Verified",
+        "algorithm": "RSA-SHA256",
+        "checkpoint": "Backend Server -> Agent Communication OK"
+      }
+    });
   }
 
   void _sendMethodNotAllowed(HttpRequest request) {
@@ -99,6 +120,8 @@ class TunnelApiService {
       "whitelist": whitelist.toList(),
     });
   }
+
+  // _handleListFiles was moved here but I will remove this duplicate block
 
   Future<void> _handleWhitelist(HttpRequest request) async {
     try {
@@ -131,7 +154,7 @@ class TunnelApiService {
     }
   }
 
-  Future<void> _handleWhitelistAdd(HttpRequest request) async {
+  Future<void> _handleWhitelistAdd(HttpRequest request, String bodyString) async {
     try {
       if (request.method != 'POST') {
         _sendJsonResponse(
@@ -142,7 +165,7 @@ class TunnelApiService {
         return;
       }
 
-      final content = await utf8.decoder.bind(request).join();
+      final content = bodyString;
       if (content.isEmpty) {
         _sendJsonResponse(
           request,
@@ -216,9 +239,9 @@ class TunnelApiService {
     }
   }
 
-  Future<void> _handleWhitelistDelete(HttpRequest request) async {
+  Future<void> _handleWhitelistDelete(HttpRequest request, String bodyString) async {
     try {
-      final content = await utf8.decoder.bind(request).join();
+      final content = bodyString;
       if (content.isEmpty) {
         _sendJsonResponse(request, {"success": false, "message": "Empty body"}, status: 400);
         return;
@@ -285,9 +308,9 @@ class TunnelApiService {
     }
   }
 
-  Future<void> _handleCreateTunnel(HttpRequest request) async {
+  Future<void> _handleCreateTunnel(HttpRequest request, String bodyString) async {
     try {
-      final content = await utf8.decoder.bind(request).join();
+      final content = bodyString;
       if (content.isEmpty) {
         _sendJsonResponse(request, {"success": false, "message": "Empty body"}, status: 400);
         return;
@@ -332,12 +355,16 @@ class TunnelApiService {
         
         _sendJsonResponse(request, {
           "success": true, 
-          "id": id,
-          "name": name,
-          "name_path": namePath,
-          "url": fullUrl,
-          "created_at": DateTime.now().toIso8601String(),
-          "message": "Tunnel created successfully"
+          "data": {
+            "id": id,
+            "name": name,
+            "name_path": namePath,
+            "type": "folder",
+            "method": "POST",
+            "url": fullUrl,
+            "created_at": DateTime.now().toIso8601String(),
+            "message": "Tunnel created successfully"
+          }
         });
       }
     } catch (e) {
@@ -346,11 +373,36 @@ class TunnelApiService {
     }
   }
 
+  Future<void> _handleSignAuth(HttpRequest request, String bodyString) async {
+    try {
+      // Robustly minify the JSON before signing to ensure a standard signature
+      final dynamic decoded = jsonDecode(bodyString);
+      final String minifiedBody = jsonEncode(decoded);
+      
+      final String signature = RSAUtils.signSHA256(RSAUtils.defaultPrivateKey, minifiedBody);
+      
+      _sendJsonResponse(request, {
+        "success": true,
+        "signature": signature,
+        "message": "Signature generated for MINIFIED JSON.",
+        "signed_body": minifiedBody,
+        "received_body": bodyString,
+      });
+    } catch (e) {
+      _sendJsonResponse(request, {
+        "success": false, 
+        "message": "Invalid JSON in request body: ${e.toString()}"
+      }, status: 400);
+    }
+  }
+
   Future<void> _handleListTunnels(HttpRequest request) async {
     final list = sharedFolders.values.map((f) => {
       "id": f.id,
       "name": f.name,
       "name_path": f.namePath,
+      "type": "folder",
+      "method": "POST",
       "path": f.localPath,
       "url": f.tunnelUrl,
       "status": f.isConnecting ? "connecting" : (f.tunnelUrl != null ? "online" : "offline"),
@@ -359,9 +411,9 @@ class TunnelApiService {
     _sendJsonResponse(request, {"success": true, "data": list});
   }
 
-  Future<void> _handleRefreshTunnel(HttpRequest request) async {
+  Future<void> _handleRefreshTunnel(HttpRequest request, String bodyString) async {
     try {
-      final content = await utf8.decoder.bind(request).join();
+      final content = bodyString;
       if (content.isEmpty) {
         _sendJsonResponse(request, {"success": false, "message": "Empty body"}, status: 400);
         return;
@@ -393,14 +445,14 @@ class TunnelApiService {
       _sendJsonResponse(request, {
         "success": true, 
         "message": "Tunnel refresh triggered",
-        "id": folder.id,
         "data": {
           "id": folder.id,
           "name": folder.name,
           "name_path": folder.namePath,
+          "type": "folder",
+          "method": "POST",
           "path": folder.localPath,
           "url": folder.tunnelUrl,
-          "created_at": folder.createdAt.toIso8601String(),
         }
       });
     } catch (e) {
@@ -408,9 +460,9 @@ class TunnelApiService {
     }
   }
 
-  Future<void> _handleDeleteTunnel(HttpRequest request) async {
+  Future<void> _handleDeleteTunnel(HttpRequest request, String bodyString) async {
     try {
-      final content = await utf8.decoder.bind(request).join();
+      final content = bodyString;
       if (content.isEmpty) {
         _sendJsonResponse(request, {"success": false, "message": "Empty body"}, status: 400);
         return;
@@ -446,21 +498,17 @@ class TunnelApiService {
     }
   }
 
-  Future<void> _handleListFiles(HttpRequest request) async {
+  Future<void> _handleListFiles(HttpRequest request, String bodyString) async {
     try {
-      final content = await utf8.decoder.bind(request).join();
+      final content = bodyString;
       if (content.isEmpty) {
          _sendJsonResponse(request, {"success": false, "message": "Empty body"}, status: 400);
          return;
       }
       
       final body = jsonDecode(content);
-      String? id = body['id']?.toString();
-
-      if (id == null || id.isEmpty) {
-        // Fallback if id is missing but path is provided (for backward compatibility if needed, but let's stick to id)
-        id = body['path']?.toString();
-      }
+      // Support both 'id' and 'path' from body as the source path
+      String? id = body['path']?.toString() ?? body['id']?.toString();
 
       // If still empty, return album list
       if (id == null || id.isEmpty) {
@@ -477,9 +525,28 @@ class TunnelApiService {
         return;
       }
 
+      onLog("API Files: Request for ID/Path: $id");
+      onLog("API Files: Currently shared: ${sharedFolders.values.map((f) => f.localPath).toList()}");
+
       SharedFolderData? foundFolder = sharedFolders[id];
       String subPathInFolder = "";
-      String finalTargetPath = id;
+
+      // 0. Try resolving by absolute local path
+      if (foundFolder == null) {
+        for (var f in sharedFolders.values) {
+          // Normalize both for comparison
+          String local = p.normalize(f.localPath);
+          String requested = p.normalize(id!);
+          
+          if (requested.startsWith(local)) {
+            foundFolder = f;
+            subPathInFolder = p.relative(requested, from: local);
+            if (subPathInFolder == ".") subPathInFolder = "";
+            onLog("API Files: Matched by local path! Folder: ${f.name}, SubPath: $subPathInFolder");
+            break;
+          }
+        }
+      }
 
       // 1. Try resolving by URL
       if (foundFolder == null && id.startsWith('http')) {
@@ -492,7 +559,6 @@ class TunnelApiService {
               foundFolder = f;
               subPathInFolder = id.substring(baseUrl.length);
               if (subPathInFolder.startsWith('/')) subPathInFolder = subPathInFolder.substring(1);
-              finalTargetPath = p.join(f.namePath, subPathInFolder);
               break;
             }
           }
@@ -515,7 +581,6 @@ class TunnelApiService {
           }
           if (foundFolder != null) {
             subPathInFolder = p.joinAll(segments.sublist(1));
-            finalTargetPath = id;
           }
         }
       }
@@ -535,20 +600,26 @@ class TunnelApiService {
         return;
       }
 
-      final entities = await Directory(fullPath).list().toList();
+
+      final entities = await Directory(fullPath).list(recursive: true).toList();
       final List<Map<String, dynamic>> data = [];
 
-      for (var e in entities) {
+      for (final e in entities) {
         final name = p.basename(e.path);
         if (name.startsWith('.')) continue;
 
         final stat = FileSystemEntity.typeSync(e.path);
         final isDir = stat == FileSystemEntityType.directory;
+        final isFile = stat == FileSystemEntityType.file;
         
-        String typeAttr = "other";
-        if (isDir) {
-          typeAttr = "folder";
-        } else if (stat == FileSystemEntityType.file) {
+        if (!isDir && !isFile) continue;
+
+        // Calculate relative path from the root of the shared folder
+        final relPath = p.relative(e.path, from: foundFolder.localPath);
+        final fStat = await e.stat();
+        
+        String typeAttr = isDir ? "folder" : "file";
+        if (isFile) {
           final ext = p.extension(e.path).toLowerCase();
           final imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic'];
           if (imageExts.contains(ext)) {
@@ -556,30 +627,23 @@ class TunnelApiService {
           }
         }
 
-        if (typeAttr == "folder" || typeAttr == "image") {
-          final relPath = p.join(finalTargetPath, name);
-          final fStat = e.statSync();
-          
-          final item = <String, dynamic>{
-            "name": name,
-            "type": typeAttr,
-            "path": relPath,
-            "created_at": fStat.modified.toIso8601String(),
-          };
+        final item = <String, dynamic>{
+          "name": name,
+          "type": typeAttr,
+          "method": isDir ? "POST" : "GET",
+          "path": relPath,
+          "size": isDir ? 0 : fStat.size,
+          "created_at": fStat.modified.toIso8601String(),
+        };
 
-          if (foundFolder.tunnelUrl != null) {
-            final subRelPath = p.join(subPathInFolder, name);
-            String url = foundFolder.tunnelUrl!;
-            if (!url.endsWith('/')) url += '/';
-            item["url"] = url + subRelPath.replaceAll('\\', '/');
-            if (isDir) item["url"] += '/';
-          }
-
-          if (typeAttr == "image") {
-            try { item["size"] = File(e.path).lengthSync(); } catch (_) { item["size"] = 0; }
-          }
-          data.add(item);
+        if (foundFolder.tunnelUrl != null) {
+          String url = foundFolder.tunnelUrl!;
+          if (!url.endsWith('/')) url += '/';
+          item["url"] = url + relPath.replaceAll('\\', '/');
+          if (isDir) item["url"] += '/';
         }
+
+        data.add(item);
       }
 
       _sendJsonResponse(request, {"success": true, "data": data});

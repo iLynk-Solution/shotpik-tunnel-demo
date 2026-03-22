@@ -7,10 +7,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'package:http/http.dart' as http; // Add http for API call
 import '../../../auth/logic/auth_manager.dart';
+import '../../../tray/tray_manager.dart';
+import '../../../../core/rsa_utils.dart'; // Correct level
 import '../widgets/status_config_card.dart';
 import '../widgets/folder_list_card.dart';
 import '../widgets/add_album_dialog.dart';
@@ -26,9 +28,6 @@ class TunnelHome extends StatefulWidget {
 }
 
 class _TunnelHomeState extends State<TunnelHome> with WindowListener {
-  final SystemTray _systemTray = SystemTray();
-  final AppWindow _appWindow = AppWindow();
-  final Menu _menu = Menu();
   AuthManager get _authManager => widget.authManager;
 
   HttpServer? _server;
@@ -54,23 +53,24 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   void initState() {
     super.initState();
     windowManager.addListener(this);
-    initSystemTray();
+    AppTrayManager().setTunnelToggleCallback(() {
+      _handleTunnelToggle();
+    });
+    AppTrayManager().setExitCallback(() {
+      _exitApp();
+    });
     _authManager.addListener(_onAuthChanged);
     _loadFolders();
 
-    // Auto-start local server on app launch (Safe: No Cloudflare calls here)
-    _startServer(bindPort: _namedTunnelPort)
-        .then((port) {
-          _currentPort = port;
-          setState(() {
-            _isRunning = true;
-            _statusMessage = "Local API Active (Tunnel Manual)";
-          });
-        })
-        .catchError((e) {
-          log("API Server failed to start: $e");
-          setState(() => _error = "API Port $_namedTunnelPort is busy.");
-        });
+    // Log the current RSA key being used
+    if (_authManager.authToken != null) {
+      log(
+        "AUTH_STATUS: App is using RSA Public Key: ${_authManager.authToken}",
+      );
+    }
+
+    // Tự động khởi động toàn bộ dịch vụ (Local Server & Cloudflare Tunnel) khi vào Trang chủ
+    _startEverything();
   }
 
   Future<void> _loadFolders() async {
@@ -91,8 +91,10 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             final path = data['path'] as String;
             final id = data['id']?.toString() ?? _generateUuid();
             final createdAtStr = data['created_at']?.toString();
-            final createdAt = createdAtStr != null ? DateTime.tryParse(createdAtStr) : null;
-            
+            final createdAt = createdAtStr != null
+                ? DateTime.tryParse(createdAtStr)
+                : null;
+
             _sharedFolders[id] = SharedFolderData(
               id: id,
               name: name,
@@ -108,7 +110,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       });
     }
 
-     // Load Whitelist
+    // Load Whitelist
     final List<String>? whitelist = prefs.getStringList('whitelist');
     if (whitelist != null) {
       _whitelist.clear();
@@ -126,7 +128,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     if (_mainTunnelUrl != null) {
       await prefs.setString('main_tunnel_url', _mainTunnelUrl!);
     }
-    
+
     await prefs.setStringList('whitelist', _whitelist.toList());
 
     final List<String> folderList = _sharedFolders.values.map((f) {
@@ -156,49 +158,115 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     super.dispose();
   }
 
-  Future<void> initSystemTray() async {
-    String iconPath = Platform.isWindows
-        ? 'assets/app_icon.ico'
-        : 'assets/shotpik-agent.png';
-    await _systemTray.initSystemTray(iconPath: iconPath);
-    await _updateTrayMenu();
-    _systemTray.registerSystemTrayEventHandler((eventName) {
-      if (eventName == kSystemTrayEventClick) {
-        _appWindow.show();
-      } else if (eventName == kSystemTrayEventRightClick) {
-        _systemTray.popUpContextMenu();
+  Future<void> _fetchFoldersFromApi() async {
+    if (_currentPort == null) return;
+
+    log("UI: Fetching folder list via RSA API...");
+    try {
+      // Even for a list call, we use POST with empty body to verify RSA signature easily with current filter
+      final bodyData = jsonEncode({});
+      final signature = RSAUtils.signSHA256(
+        RSAUtils.defaultPrivateKey,
+        bodyData,
+      );
+
+      final response = await http.post(
+        Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/list"),
+        headers: {"Content-Type": "application/json", "X-Signature": signature},
+        body: bodyData,
+      );
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> body = jsonDecode(response.body);
+        final List<dynamic> data = body['data'];
+
+        setState(() {
+          for (var folderJson in data) {
+            final String id = folderJson['id'];
+            final String name = folderJson['name'];
+            final String namePath = folderJson['name_path'];
+            final String localPath = folderJson['path'];
+            final String? tunnelUrl = folderJson['url'];
+
+            if (_sharedFolders.containsKey(id)) {
+              // Update only metadata, keep existing process/subs
+              final existing = _sharedFolders[id]!;
+              _sharedFolders[id] = SharedFolderData(
+                id: id,
+                name: name,
+                namePath: namePath,
+                localPath: localPath,
+                tunnelUrl: tunnelUrl,
+                createdAt: existing.createdAt,
+                process: existing.process,
+                outSub: existing.outSub,
+                errSub: existing.errSub,
+                isConnecting: existing.isConnecting,
+              );
+            } else {
+              // New folder from API
+              _sharedFolders[id] = SharedFolderData(
+                id: id,
+                name: name,
+                namePath: namePath,
+                localPath: localPath,
+                tunnelUrl: tunnelUrl,
+                createdAt: DateTime.parse(folderJson['created_at']),
+              );
+            }
+          }
+        });
+        log("UI: Folders synchronized with API successfully.");
       }
-    });
+    } catch (e) {
+      log("UI Fetch API Error: $e");
+    }
+  }
+
+  Future<void> _updateTunnelOnServer(String domain) async {
+    final token = _authManager.authToken;
+    if (token == null) return;
+
+    try {
+      log("API: Updating tunnel domain on server: $domain");
+
+      final response = await http.put(
+        Uri.parse("https://shotpik.com/api/v1/update-tunnel-domain"),
+        headers: {
+          "Authorization": "Bearer $token",
+          "Content-Type": "application/json",
+        },
+        body: jsonEncode({"tunnel_domain": domain}),
+      );
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        log(
+          "API SUCCESS from https://shotpik.com/api/v1/update-tunnel-domain: Tunnel domain updated.",
+        );
+        log("Response Body: ${response.body}");
+      } else {
+        log(
+          "API ERROR from https://shotpik.com/api/v1/update-tunnel-domain. Status: ${response.statusCode}",
+        );
+        log("Response Body: ${response.body}");
+      }
+    } catch (e) {
+      log("API EXCEPTION: $e");
+    }
   }
 
   Future<void> _updateTrayMenu() async {
-    await _menu.buildFrom([
-      MenuItemLabel(
-        label: _isRunning ? 'Status: SERVER ACTIVE' : 'Status: OFFLINE',
-        enabled: false,
-      ),
-      MenuSeparator(),
-      MenuItemLabel(
-        label: _isRunning ? 'Stop Service' : 'Start Service',
-        onClicked: (menuItem) => _handleTunnelToggle(),
-      ),
-      MenuItemLabel(
-        label: 'Show Window',
-        onClicked: (menuItem) => windowManager.show(),
-      ),
-      MenuSeparator(),
-      MenuItemLabel(label: 'Exit', onClicked: (menuItem) => _exitApp()),
-    ]);
-    await _systemTray.setContextMenu(_menu);
+    await AppTrayManager().updateTrayMenu(isRunning: _isRunning);
   }
 
   Future<void> _exitApp() async {
+    log("Exiting application gracefully...");
     await _stopEverything();
     exit(0);
   }
 
   @override
   void onWindowClose() async {
+    log("Handling window close: Hiding to tray.");
     await windowManager.hide();
   }
 
@@ -239,23 +307,62 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
       _server!.listen((HttpRequest request) async {
         try {
-          final authHeader = request.headers.value(
-            HttpHeaders.authorizationHeader,
-          );
-          final urlToken = request.uri.queryParameters['token'];
-          final hostHeader = request.headers.value(
-            HttpHeaders.hostHeader,
-          ); // e.g., "my-album-name"
-          bool isAuthorized = false;
-          final currentApiToken = _authManager.authToken;
-
-          if (authHeader != null && authHeader.startsWith('Bearer ')) {
-            if (authHeader.substring(7) == currentApiToken) isAuthorized = true;
-          }
-          if (urlToken == currentApiToken) isAuthorized = true;
-
+          final hostHeader = request.headers.value(HttpHeaders.hostHeader);
           final requestPath = Uri.decodeComponent(request.uri.path);
           log("--> ${request.method} $requestPath (Host: $hostHeader)");
+
+          // Read the entire body to verify signature
+          final bodyString = await utf8.decoder.bind(request).join();
+
+          // --- RSA Signature Verification ---
+          // Use the EXACT Public Key from assets/md/flow-authen.md
+          const publicKey =
+              "MIGeMA0GCSqGSIb3DQEBAQUAA4GMADCBiAKBgG1oJHc0YeN9EzTO69XWcBs95U7aQtCFvuzj8V5cSBI34x/gwtwsBkSahkh0faMzKVXFJjOl+vp46YzVlnq+W3A9Hn1FnxNe3raS0bLNx7Scz3KYM9+p9xv7cRrwzUx3rlm3QyJXGzhd3eKrHgOeVESsPr2xoRY8G/4E2qod9EJvAgMBAAE=";
+
+          final String? signature = request.headers.value('X-Signature');
+
+          bool isAuthorized = false;
+          if (signature != null && signature.isNotEmpty) {
+            try {
+              // 1. Initial verification (on raw body exactly as received)
+              isAuthorized = RSAUtils.verifySHA256Signature(
+                publicKey,
+                bodyString,
+                signature,
+              );
+
+              // 2. Fallback: Robust verification for formatted JSON
+              if (!isAuthorized) {
+                try {
+                  // Attempt to decode and re-encode in MINIFIED (compact) format
+                  final dynamic decoded = jsonDecode(bodyString);
+                  final minifiedBody = jsonEncode(decoded);
+
+                  isAuthorized = RSAUtils.verifySHA256Signature(
+                    publicKey,
+                    minifiedBody,
+                    signature,
+                  );
+                  if (isAuthorized) {
+                    log("RSA: SUCCESS using Minified JSON normalization.");
+                  }
+                } catch (_) {
+                  // Not valid JSON or can't minify, no problem
+                }
+              }
+
+              if (isAuthorized) {
+                log("API: RSA Signature verified successfully.");
+              } else {
+                log("API: RSA Signature INVALID.");
+                log(
+                  "DEBUG Body Received (Len: ${bodyString.length}): |$bodyString|",
+                );
+              }
+            } catch (e) {
+              log("API RSA Error: $e");
+            }
+          }
 
           final apiService = TunnelApiService(
             sharedFolders: _sharedFolders,
@@ -300,15 +407,36 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             },
           );
 
-          // Handle API requests (Always need Auth)
+          // Handle API requests (Always need RSA Auth, except for 'sign' which needs JWT)
           if (requestPath.startsWith('/api/v1/')) {
-            if (!isAuthorized) {
+            final bool isSignRequest = requestPath == '/api/v1/auth/sign';
+
+            if (isSignRequest) {
+              final authHeader = request.headers.value(
+                HttpHeaders.authorizationHeader,
+              );
+              final currentToken = _authManager.authToken;
+
+              if (authHeader == null ||
+                  !authHeader.startsWith('Bearer ') ||
+                  authHeader.substring(7) != currentToken) {
+                request.response.statusCode = HttpStatus.unauthorized;
+                request.response.write(
+                  '401 Unauthorized: Invalid or missing Bearer token.',
+                );
+                await request.response.close();
+                return;
+              }
+              // If JWT is valid, we can proceed to sign
+            } else if (!isAuthorized) {
               request.response.statusCode = HttpStatus.forbidden;
-              request.response.write('403 Forbidden: Token không hợp lệ.');
+              request.response.write(
+                '403 Forbidden: RSA Signature invalid or missing.',
+              );
               await request.response.close();
               return;
             }
-            await apiService.handleRequest(request);
+            await apiService.handleRequest(request, bodyString);
             return;
           }
 
@@ -355,9 +483,11 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
           if (folderData == null) {
             // Check if it's the main tunnel (API gateway) but no subpath
-            bool isMain = _mainTunnelUrl != null && hostHeader != null && 
-                          _mainTunnelUrl!.contains(hostHeader.split(':')[0]);
-            
+            bool isMain =
+                _mainTunnelUrl != null &&
+                hostHeader != null &&
+                _mainTunnelUrl!.contains(hostHeader.split(':')[0]);
+
             if (isMain && pathSegments.isEmpty) {
               request.response.statusCode = HttpStatus.ok;
               request.response.write('API Gateway Online');
@@ -376,37 +506,45 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
           // Resolve subPath within the folder
           String subPath = "";
           final hostOnly = hostHeader?.split(':')[0].toLowerCase();
-          bool matchedByDomain = hostOnly != null && folderData.tunnelUrl != null && 
-                                 folderData.tunnelUrl!.contains(hostOnly);
+          bool matchedByDomain =
+              hostOnly != null &&
+              folderData.tunnelUrl != null &&
+              folderData.tunnelUrl!.contains(hostOnly);
 
           if (matchedByDomain) {
             subPath = requestPath;
           } else if (pathSegments.isNotEmpty) {
             subPath = p.joinAll(pathSegments.sublist(1));
           }
-          
+
           // Strip leading slashes
           while (subPath.startsWith('/')) {
             subPath = subPath.substring(1);
           }
-          
+
           final fullPath = p.join(folderData.localPath, subPath);
           final entityType = FileSystemEntity.typeSync(fullPath);
           final bool isFileRequest = entityType == FileSystemEntityType.file;
 
-          // AUTH CHECK: 
+          // AUTH CHECK:
           // Bypass ONLY for FILES if folder namePath is in whitelist.
           // Folders (directory listing) ALWAYS REQUIRE Authorization.
-          bool canAccess = isAuthorized || (isFileRequest && _whitelist.contains(folderData.namePath));
+          bool canAccess =
+              isAuthorized ||
+              (isFileRequest && _whitelist.contains(folderData.namePath));
 
           if (!canAccess) {
             request.response.statusCode = HttpStatus.forbidden;
-            request.response.write('403 Forbidden: Token không hợp lệ hoặc không có quyền truy cập thư mục.');
+            request.response.write(
+              '403 Forbidden: Token không hợp lệ hoặc không có quyền truy cập thư mục.',
+            );
             await request.response.close();
             return;
           }
 
-          log("Matched: ${folderData.name} - File: $isFileRequest - Auth Bypassed: ${!isAuthorized}");
+          log(
+            "Matched: ${folderData.name} - File: $isFileRequest - Auth Bypassed: ${!isAuthorized}",
+          );
 
           if (isFileRequest) {
             final file = File(fullPath);
@@ -502,6 +640,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         _currentPort = port;
       }
 
+      await _fetchFoldersFromApi();
+
       setState(() {
         _isRunning = true;
         _statusMessage = 'Service Ready';
@@ -580,6 +720,9 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         _mainTunnelUrl = match.group(0);
         _isConnecting = false;
         _saveFolders();
+
+        // Notify Shotpik Server
+        _updateTunnelOnServer(match.group(0)!);
       });
       return;
     }
@@ -696,24 +839,110 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
   Future<void> _startSharing() async {
     if (!_isRunning) return;
+    if (_currentPort == null) {
+      log("Error: Server port not available.");
+      return;
+    }
+
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (context) => const AddAlbumDialog(),
     );
+
     if (result != null) {
       final name = result['name'] as String;
       final path = result['path'] as String;
       final nameUrl = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_');
 
-      final newData = SharedFolderData(
-        id: _generateUuid(),
-        name: name,
-        namePath: nameUrl,
-        localPath: path,
+      log("UI: Calling local HTTP API to create folder...");
+
+      try {
+        final bodyData = jsonEncode({
+          "name": name,
+          "name_path": nameUrl,
+          "path": path,
+        });
+
+        final signature = RSAUtils.signSHA256(
+          RSAUtils.defaultPrivateKey,
+          bodyData,
+        );
+
+        final response = await http.post(
+          Uri.parse("http://127.0.0.1:$_currentPort/api/v1/create-folder"),
+          headers: {
+            "Content-Type": "application/json",
+            "X-Signature": signature,
+          },
+          body: bodyData,
+        );
+
+        if (response.statusCode == 200) {
+          log("API SUCCESS: Folder created via Local API call.");
+          log("Output: ${response.body}");
+        } else {
+          log("API ERROR (${response.statusCode}): ${response.body}");
+        }
+      } catch (e) {
+        log("UI Request Error: $e");
+      }
+    }
+  }
+
+  Future<void> _refreshTunnel(String id) async {
+    if (_currentPort == null) return;
+
+    // Set connecting status locally first for immediate UI feedback
+    setState(() {
+      final folder = _sharedFolders[id];
+      if (folder != null) {
+        folder.isConnecting = true;
+        folder.tunnelUrl = null;
+      }
+    });
+
+    log("UI: Calling local HTTP API to refresh tunnel (ID: $id)...");
+
+    try {
+      final bodyData = jsonEncode({"id": id});
+      final signature = RSAUtils.signSHA256(
+        RSAUtils.defaultPrivateKey,
+        bodyData,
       );
-      setState(() => _sharedFolders[newData.id] = newData);
-      _saveFolders();
-      _startTunnelForFolder(newData.id);
+
+      // --- Log Sample CURL for Refresh ---
+      log("--- SAMPLE REFRESH CURL ---");
+      log(
+        "curl --location --request POST 'http://127.0.0.1:$_currentPort/api/v1/tunnel/refresh' \\",
+      );
+      log("--header 'Content-Type: application/json' \\");
+      log("--header 'X-Signature: $signature' \\");
+      log("--data '$bodyData'");
+      log("---------------------------");
+
+      final response = await http.post(
+        Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/refresh"),
+        headers: {
+          "Content-Type": "application/json",
+          "X-Signature": signature,
+        },
+        body: bodyData,
+      );
+
+      if (response.statusCode == 200) {
+        log("API SUCCESS: Tunnel refresh triggered via Local API.");
+      } else {
+        log("API ERROR (${response.statusCode}): ${response.body}");
+        // Revert status on error
+        setState(() {
+          final folder = _sharedFolders[id];
+          if (folder != null) {
+            folder.isConnecting = false;
+          }
+        });
+      }
+    } catch (e) {
+      log("UI Refresh Request Error: $e");
     }
   }
 
@@ -746,14 +975,46 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     );
 
     if (confirm == true) {
-      final folderData = _sharedFolders[id];
-      if (folderData != null) {
-        folderData.outSub?.cancel();
-        folderData.errSub?.cancel();
-        folderData.process?.kill();
+      log("UI: Calling local HTTP API to delete tunnel (ID: $id)...");
+      try {
+        final bodyData = jsonEncode({"id": id});
+        final signature = RSAUtils.signSHA256(
+          RSAUtils.defaultPrivateKey,
+          bodyData,
+        );
+
+        // --- Log Sample CURL for Delete ---
+        log("--- SAMPLE DELETE CURL ---");
+        log(
+          "curl --location --request POST 'http://127.0.0.1:$_currentPort/api/v1/tunnel/delete' \\",
+        );
+        log("--header 'Content-Type: application/json' \\");
+        log("--header 'X-Signature: $signature' \\");
+        log("--data '$bodyData'");
+        log("---------------------------");
+
+        final response = await http.post(
+          Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/delete"),
+          headers: {
+            "Content-Type": "application/json",
+            "X-Signature": signature,
+          },
+          body: bodyData,
+        );
+
+        if (response.statusCode == 200) {
+          log("API SUCCESS: Tunnel deleted via Local API call.");
+          // Update the UI after successful API call
+          setState(() {
+            _sharedFolders.remove(id);
+          });
+          _saveFolders();
+        } else {
+          log("API DELETE ERROR (${response.statusCode}): ${response.body}");
+        }
+      } catch (e) {
+        log("UI Delete Request Error: $e");
       }
-      setState(() => _sharedFolders.remove(id));
-      _saveFolders();
     }
   }
 
@@ -822,7 +1083,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                             apiToken: _authManager.authToken ?? '',
                             onAddFolder: _startSharing,
                             onRemoveFolder: _removeFolder,
-                            onRefreshTunnel: _startTunnelForFolder,
+                            onRefreshTunnel: _refreshTunnel,
                           ),
                         ),
                         // if (kDebugMode)
@@ -972,72 +1233,80 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     ),
   );
 
-  Widget _buildUserCard(BuildContext context) => Container(
-    margin: const EdgeInsets.all(16),
-    padding: const EdgeInsets.all(16),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(20),
-      boxShadow: [
-        BoxShadow(
-          color: Colors.black.withValues(alpha: 0.03),
-          blurRadius: 10,
-          offset: const Offset(0, 4),
-        ),
-      ],
-    ),
-    child: Row(
-      children: [
-        CircleAvatar(
-          radius: 18,
-          backgroundColor: Theme.of(
-            context,
-          ).colorScheme.primary.withValues(alpha: 0.1),
-          child: Icon(
-            Icons.person_rounded,
-            size: 18,
-            color: Theme.of(context).colorScheme.primary,
+  Widget _buildUserCard(BuildContext context) {
+    final email = _authManager.userData?['email'] ?? "agent@shotpik.com";
+    final name =
+        _authManager.userData?['name'] ??
+        _authManager.userData?['sub'] ??
+        "Agent User";
+
+    return Container(
+      margin: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
           ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                _authManager.userName ?? "User",
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                  color: Theme.of(context).colorScheme.onSurface,
-                ),
-              ),
-              Text(
-                _authManager.userEmail!,
-                style: TextStyle(
-                  fontSize: 10,
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.onSurface.withValues(alpha: 0.5),
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-          ),
-        ),
-        IconButton(
-          icon: Icon(
-            Icons.logout_rounded,
-            size: 18,
-            color: Theme.of(
+        ],
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 18,
+            backgroundColor: Theme.of(
               context,
-            ).colorScheme.onSurface.withValues(alpha: 0.4),
+            ).colorScheme.primary.withValues(alpha: 0.1),
+            child: Icon(
+              Icons.person_rounded,
+              size: 18,
+              color: Theme.of(context).colorScheme.primary,
+            ),
           ),
-          onPressed: () => _authManager.logout(),
-        ),
-      ],
-    ),
-  );
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: Theme.of(context).colorScheme.onSurface,
+                  ),
+                ),
+                Text(
+                  email,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.onSurface.withValues(alpha: 0.5),
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: Icon(
+              Icons.logout_rounded,
+              size: 18,
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.4),
+            ),
+            onPressed: () => _authManager.logout(),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildTopBar(BuildContext context) => Container(
     height: 80,

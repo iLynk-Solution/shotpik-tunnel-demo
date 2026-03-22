@@ -21,6 +21,8 @@ class SharedFolderData {
     DateTime? createdAt,
     this.tunnelUrl,
     this.process,
+    this.outSub,
+    this.errSub,
     this.isConnecting = false,
   }) : createdAt = createdAt ?? DateTime.now();
 }
