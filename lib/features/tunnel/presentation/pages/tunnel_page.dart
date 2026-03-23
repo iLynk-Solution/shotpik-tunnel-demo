@@ -9,15 +9,20 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
-import 'package:http/http.dart' as http; // Add http for API call
+import 'package:http/http.dart' as http;
+import 'package:file_picker/file_picker.dart';
+import 'package:file_selector/file_selector.dart';
+
 import '../../../auth/logic/auth_manager.dart';
 import '../../../tray/tray_manager.dart';
-import '../../../../core/rsa_utils.dart'; // Correct level
-import '../widgets/status_config_card.dart';
-import '../widgets/folder_list_card.dart';
-import '../widgets/add_album_dialog.dart';
+import '../../../../core/rsa_utils.dart';
+import '../../../../core/app_config.dart';
 import '../../domain/tunnel_models.dart';
 import '../../logic/tunnel_api_service.dart';
+import '../widgets/add_album_dialog.dart';
+import '../widgets/sidebar.dart';
+import 'whitelist_page.dart';
+import '../widgets/dashboard_view.dart';
 
 class TunnelHome extends StatefulWidget {
   final AuthManager authManager;
@@ -48,6 +53,13 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
   final List<String> _logs = [];
   final ScrollController _scroll = ScrollController();
+
+  final TextEditingController _searchController = TextEditingController();
+  List<dynamic> _searchResults = [];
+  bool _isSearching = false;
+  String _searchRoot = Platform.environment['HOME'] ?? Directory.current.path;
+
+  int _selectedIndex = 0;
 
   @override
   void initState() {
@@ -155,7 +167,136 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     _stopEverything(isDisposing: true);
     _server?.close(force: true);
     _scroll.dispose();
+    _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _pickSearchRoot() async {
+    final String? dir = await getDirectoryPath();
+    if (dir != null) {
+      setState(() {
+        _searchRoot = dir;
+        // Hiện bảng kết quả ngay với chính thư mục vừa chọn
+        _searchResults = [
+          {'path': dir}
+        ];
+      });
+      log("UI: Search Root updated and added to results panel: $dir");
+    }
+  }
+
+  Future<void> _handleSearchAction() async {
+    final query = _searchController.text.trim();
+    if (query.isEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+
+    if (_currentPort == null) return;
+
+    setState(() => _isSearching = true);
+
+    log("UI: Searching for folders matching '$query' in '$_searchRoot'...");
+    try {
+      final bodyData = jsonEncode({"path": query, "base_path": _searchRoot});
+      final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
+
+      final response = await http.post(
+        Uri.parse("http://127.0.0.1:8888/api/v1/search"),
+        headers: {"Content-Type": "application/json", "X-Signature": signature},
+        body: bodyData,
+      );
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> body = jsonDecode(response.body);
+        setState(() {
+          _searchResults = body['data'] ?? [];
+          _isSearching = false;
+        });
+      } else {
+        log("API SEARCH ERROR (${response.statusCode}): ${response.body}");
+        setState(() => _isSearching = false);
+      }
+    } catch (e) {
+      log("UI Search Request Error: $e");
+      setState(() => _isSearching = false);
+    }
+  }
+
+  Future<void> _startSharingForPath(String path) async {
+    // If relative, make absolute relative to current dir
+    String fullPath = path;
+    if (!p.isAbsolute(path)) {
+      fullPath = p.normalize(p.join(Directory.current.path, path));
+    }
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => AddAlbumDialog(initialPath: fullPath),
+    );
+
+    if (result != null) {
+      final name = result['name'] as String;
+      final pathResult = result['path'] as String;
+      final nameUrl = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_');
+
+      log(
+        "UI: Calling local HTTP API to create tunnel for searched path (customized)...",
+      );
+      try {
+        final bodyData = jsonEncode({
+          "name": name,
+          "name_path": nameUrl,
+          "path": pathResult,
+        });
+        final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
+
+        final response = await http.post(
+          Uri.parse("http://127.0.0.1:8888/api/v1/tunnel/create"),
+          headers: {
+            "Content-Type": "application/json",
+            "X-Signature": signature,
+          },
+          body: bodyData,
+        );
+
+        if (response.statusCode == 200) {
+          log("API SUCCESS: Tunnel created via Search Result.");
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  "Đã thêm Album thành công!",
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                backgroundColor: Colors.green,
+              ),
+            );
+            setState(() {
+              _searchResults = [];
+              _searchController.clear();
+            });
+          }
+        } else {
+          log("API ERROR (${response.statusCode}): ${response.body}");
+          if (mounted) {
+            final json = jsonDecode(response.body);
+            final msg = json['message'] ?? "Lỗi không xác định";
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  msg.toString(),
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                backgroundColor: Colors.redAccent,
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        log("UI Request Error: $e");
+      }
+    }
   }
 
   Future<void> _fetchFoldersFromApi() async {
@@ -165,10 +306,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     try {
       // Even for a list call, we use POST with empty body to verify RSA signature easily with current filter
       final bodyData = jsonEncode({});
-      final signature = RSAUtils.signSHA256(
-        RSAUtils.defaultPrivateKey,
-        bodyData,
-      );
+      final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
       final response = await http.post(
         Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/list"),
@@ -275,11 +413,6 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     if (!mounted) return;
     debugPrint("TUNNEL LOG: $message");
     setState(() => _logs.add(message));
-    Future.delayed(const Duration(milliseconds: 50), () {
-      if (_scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-      }
-    });
   }
 
   String _generateUuid() {
@@ -314,9 +447,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
           // Read the entire body to verify signature
           final bodyString = await utf8.decoder.bind(request).join();
 
-          // --- RSA Signature Verification ---
-          // Use the EXACT Public Key from assets/md/flow-authen.md
-          const publicKey = "....";
+          // Use the Public Key from AppConfig or Environment
+          final String publicKey = AppConfig.rsaPublicKey;
 
           final String? signature = request.headers.value('X-Signature');
 
@@ -324,7 +456,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
           if (signature != null && signature.isNotEmpty) {
             try {
               // 1. Initial verification (on raw body exactly as received)
-              isAuthorized = RSAUtils.verifySHA256Signature(
+              isAuthorized = RSAUtils.verifySignature(
                 publicKey,
                 bodyString,
                 signature,
@@ -337,7 +469,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                   final dynamic decoded = jsonDecode(bodyString);
                   final minifiedBody = jsonEncode(decoded);
 
-                  isAuthorized = RSAUtils.verifySHA256Signature(
+                  isAuthorized = RSAUtils.verifySignature(
                     publicKey,
                     minifiedBody,
                     signature,
@@ -354,9 +486,9 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                 log("API: RSA Signature verified successfully.");
               } else {
                 log("API: RSA Signature INVALID.");
-                log(
-                  "DEBUG Body Received (Len: ${bodyString.length}): |$bodyString|",
-                );
+                log("DEBUG Path: $requestPath");
+                log("DEBUG Signature Received: $signature");
+                log("DEBUG Body Received (Len: ${bodyString.length}): |$bodyString|");
               }
             } catch (e) {
               log("API RSA Error: $e");
@@ -368,20 +500,13 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             whitelist: _whitelist,
             mainTunnelUrl: _mainTunnelUrl,
             onLog: log,
-            onAddFolder: (id, name, namePath, path) async {
-              if (!Directory(path).existsSync()) {
-                return "Error: Local path does not exist: $path";
-              }
+            onAddFolder: _registerLocalFolder,
+            onUpdateWhitelist: (paths) async {
               setState(() {
-                _sharedFolders[id] = SharedFolderData(
-                  id: id,
-                  name: name,
-                  namePath: namePath,
-                  localPath: path,
-                );
+                _whitelist.clear();
+                _whitelist.addAll(paths);
               });
-              _saveFolders();
-              return await _startTunnelForFolder(id);
+              await _saveFolders();
             },
             onRemoveFolder: (id) async {
               final folderData = _sharedFolders[id];
@@ -393,22 +518,18 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                 _saveFolders();
               }
             },
-            onUpdateWhitelist: (paths) async {
-              setState(() {
-                _whitelist.clear();
-                _whitelist.addAll(paths);
-              });
-              await _saveFolders();
-            },
             onStartService: _startEverything,
             onRefreshTunnel: (id) async {
               await _startTunnelForFolder(id);
             },
           );
 
-          // Handle API requests (Always need RSA Auth, except for 'sign' which needs JWT)
-          if (requestPath.startsWith('/api/v1/')) {
+          // Handle API requests (Always need RSA Auth, except for 'sign' which needs JWT and 'verify' which can report its own fail)
+          // /file/ is a public endpoint handled by apiService
+          if (requestPath.startsWith('/api/v1/') || requestPath.startsWith('/file/')) {
             final bool isSignRequest = requestPath == '/api/v1/auth/sign';
+            final bool isVerifyRequest = requestPath == '/api/v1/auth/verify';
+            final bool isFileRequest = requestPath.startsWith('/file/');
 
             if (isSignRequest) {
               final authHeader = request.headers.value(
@@ -427,7 +548,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                 return;
               }
               // If JWT is valid, we can proceed to sign
-            } else if (!isAuthorized) {
+            } else if (!isAuthorized && !isVerifyRequest && !isFileRequest) {
               request.response.statusCode = HttpStatus.forbidden;
               request.response.write(
                 '403 Forbidden: RSA Signature invalid or missing.',
@@ -435,7 +556,11 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
               await request.response.close();
               return;
             }
-            await apiService.handleRequest(request, bodyString);
+            await apiService.handleRequest(
+              request,
+              bodyString,
+              isAuthorized: isAuthorized,
+            );
             return;
           }
 
@@ -853,8 +978,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       final path = result['path'] as String;
       final nameUrl = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '_');
 
-      log("UI: Calling local HTTP API to create folder...");
-
+      log("UI: Calling local HTTP API to create tunnel...");
       try {
         final bodyData = jsonEncode({
           "name": name,
@@ -862,13 +986,10 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
           "path": path,
         });
 
-        final signature = RSAUtils.signSHA256(
-          RSAUtils.defaultPrivateKey,
-          bodyData,
-        );
+        final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
         final response = await http.post(
-          Uri.parse("http://127.0.0.1:$_currentPort/api/v1/create-folder"),
+          Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/create"),
           headers: {
             "Content-Type": "application/json",
             "X-Signature": signature,
@@ -877,15 +998,62 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         );
 
         if (response.statusCode == 200) {
-          log("API SUCCESS: Folder created via Local API call.");
-          log("Output: ${response.body}");
+          log("API SUCCESS: Tunnel created via Local API call.");
         } else {
           log("API ERROR (${response.statusCode}): ${response.body}");
+          if (mounted) {
+            String errorMessage = "Lỗi khi tạo tunnel (${response.statusCode})";
+            try {
+              final json = jsonDecode(response.body);
+              if (json['message'] != null) {
+                errorMessage = json['message'].toString().replaceFirst(
+                  "Error: ",
+                  "",
+                );
+              }
+            } catch (_) {}
+
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  errorMessage,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                backgroundColor: Colors.redAccent,
+                behavior: SnackBarBehavior.floating,
+                margin: const EdgeInsets.all(20),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            );
+          }
         }
       } catch (e) {
         log("UI Request Error: $e");
       }
     }
+  }
+
+  Future<String?> _registerLocalFolder(
+    String id,
+    String name,
+    String namePath,
+    String path,
+  ) async {
+    if (!Directory(path).existsSync()) {
+      return "Error: Local path does not exist: $path";
+    }
+    setState(() {
+      _sharedFolders[id] = SharedFolderData(
+        id: id,
+        name: name,
+        namePath: namePath,
+        localPath: path,
+      );
+    });
+    _saveFolders();
+    return await _startTunnelForFolder(id);
   }
 
   Future<void> _refreshTunnel(String id) async {
@@ -900,14 +1068,15 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       }
     });
 
-    log("UI: Calling local HTTP API to refresh tunnel (ID: $id)...");
+    final folder = _sharedFolders[id];
+    if (folder == null) return;
+    final folderPath = folder.localPath;
+
+    log("UI: Calling local HTTP API to refresh tunnel (Path: $folderPath)...");
 
     try {
-      final bodyData = jsonEncode({"id": id});
-      final signature = RSAUtils.signSHA256(
-        RSAUtils.defaultPrivateKey,
-        bodyData,
-      );
+      final bodyData = jsonEncode({"path": folderPath});
+      final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
       // --- Log Sample CURL for Refresh ---
       log("--- SAMPLE REFRESH CURL ---");
@@ -942,6 +1111,132 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     }
   }
 
+  Future<void> _handleExportShortcut(SharedFolderData folder) async {
+    String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
+
+    if (selectedDirectory == null) {
+      log("UI: Export cancelled (no directory selected).");
+      return;
+    }
+
+    if (!mounted) return;
+
+    final TextEditingController pathController = TextEditingController(
+      text: p.join(selectedDirectory, "session-${folder.namePath}"),
+    );
+
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Tạo Export Shortcut"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Nhập đường dẫn thư mục export:",
+              style: TextStyle(fontSize: 14),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: pathController,
+              decoration: const InputDecoration(
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              "Hệ thống sẽ lấy danh sách file trong album này để tạo shortcut (symlink) vào thư mục trên.",
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Hủy"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("Tạo Shortcut"),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+
+    if (confirm == true) {
+      final exportPath = pathController.text;
+      if (exportPath.isEmpty) return;
+
+      log("UI: Testing Export API (/api/v1/create-folder)...");
+      try {
+        if (_currentPort == null) {
+          log("UI Export Error: Server port not available.");
+          return;
+        }
+
+        // Prepare file list from the local folder
+        final dir = Directory(folder.localPath);
+        if (!await dir.exists()) {
+          log("UI Export Error: Thư mục nguồn không tồn tại.");
+          return;
+        }
+
+        final bodyData = jsonEncode({
+          "path": folder.localPath, // Source path
+          "location": exportPath, // Destination path
+          "files": [], // Send empty to tell server to "lấy hết" (take all)
+        });
+
+        final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
+
+        final response = await http.post(
+          Uri.parse("http://127.0.0.1:$_currentPort/api/v1/create-folder"),
+          headers: {
+            "Content-Type": "application/json",
+            "X-Signature": signature,
+          },
+          body: bodyData,
+        );
+
+        if (!mounted) return;
+
+        if (response.statusCode == 200) {
+          final absoluteExportPath = Directory(exportPath).absolute.path;
+          log(
+            "API SUCCESS: Export Shortcut created successfully at $absoluteExportPath",
+          );
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text("Đã tạo shortcut tại $absoluteExportPath"),
+                action: SnackBarAction(
+                  label: "Mở thư mục",
+                  onPressed: () async {
+                    if (Platform.isMacOS) {
+                      await Process.run('open', [absoluteExportPath]);
+                    } else if (Platform.isWindows) {
+                      await Process.run('explorer.exe', [absoluteExportPath]);
+                    }
+                  },
+                ),
+                duration: const Duration(seconds: 10),
+              ),
+            );
+          }
+        } else {
+          log("API ERROR (${response.statusCode}): ${response.body}");
+        }
+      } catch (e) {
+        log("UI Export Request Error: $e");
+      }
+    }
+  }
+
   void _removeFolder(String id) async {
     final folder = _sharedFolders[id];
     if (folder == null) return;
@@ -971,13 +1266,12 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     );
 
     if (confirm == true) {
-      log("UI: Calling local HTTP API to delete tunnel (ID: $id)...");
+      log(
+        "UI: Calling local HTTP API to delete tunnel (Path: ${folder.localPath})...",
+      );
       try {
-        final bodyData = jsonEncode({"id": id});
-        final signature = RSAUtils.signSHA256(
-          RSAUtils.defaultPrivateKey,
-          bodyData,
-        );
+        final bodyData = jsonEncode({"path": folder.localPath});
+        final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
         // --- Log Sample CURL for Delete ---
         log("--- SAMPLE DELETE CURL ---");
@@ -1051,50 +1345,56 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: Row(
         children: [
-          _buildSidebar(context),
+          TunnelSidebar(
+            selectedIndex: _selectedIndex,
+            onIndexChanged: (idx) => setState(() => _selectedIndex = idx),
+            userName:
+                _authManager.userData?['name'] ?? _authManager.userData?['sub'],
+            userEmail: _authManager.userData?['email'],
+            onLogout: () => _authManager.logout(),
+          ),
           Expanded(
-            child: Column(
-              children: [
-                _buildTopBar(context),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.all(32),
-                    child: Column(
-                      spacing: 20,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        StatusConfigCard(
-                          isRunning: _isRunning,
-                          isConnecting: _isConnecting,
-                          statusMessage: _statusMessage,
-                          onToggleTunnel: _handleTunnelToggle,
-                          tunnelUrl: _mainTunnelUrl,
-                        ),
-                        if (_error != null) _buildErrorCard(),
-                        Expanded(
-                          flex: 3,
-                          child: FolderListCard(
-                            isRunning: _isRunning,
-                            sharedFolders: _sharedFolders,
-                            apiToken: _authManager.authToken ?? '',
-                            onAddFolder: _startSharing,
-                            onRemoveFolder: _removeFolder,
-                            onRefreshTunnel: _refreshTunnel,
-                          ),
-                        ),
-                        // if (kDebugMode)
-                        //   Expanded(
-                        //     child: DebugLogView(
-                        //       logs: _logs,
-                        //       scrollController: _scroll,
-                        //       onClearLogs: () => setState(() => _logs.clear()),
-                        //     ),
-                        //   ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
+            child: Container(
+              decoration: const BoxDecoration(color: Colors.white),
+              clipBehavior: Clip.antiAlias,
+              child: _selectedIndex == 0
+                  ? DashboardView(
+                      currentPort: _currentPort,
+                      scrollController: _scroll,
+                      searchRoot: _searchRoot,
+                      onPickSearchRoot: _pickSearchRoot,
+                      searchController: _searchController,
+                      onSearch: _handleSearchAction,
+                      isSearching: _isSearching,
+                      onClearSearch: () {
+                        _searchController.clear();
+                        setState(() => _searchResults = []);
+                      },
+                      isRunning: _isRunning,
+                      isConnecting: _isConnecting,
+                      statusMessage: _statusMessage,
+                      onToggleTunnel: _handleTunnelToggle,
+                      tunnelUrl: _mainTunnelUrl,
+                      error: _error,
+                      searchResults: _searchResults,
+                      onClearSearchResults: () =>
+                          setState(() => _searchResults = []),
+                      onStartSharingForPath: _startSharingForPath,
+                      sharedFolders: _sharedFolders,
+                      apiToken: _authManager.authToken ?? '',
+                      whitelist: _whitelist,
+                      onAddFolder: _startSharing,
+                      onRemoveFolder: _removeFolder,
+                      onRefreshTunnel: _refreshTunnel,
+                      onExportFolder: _handleExportShortcut,
+                    )
+                  : _selectedIndex == 1
+                      ? WhitelistPage(
+                          currentPort: _currentPort,
+                          whitelist: _whitelist,
+                          sharedFolders: _sharedFolders,
+                        )
+                      : const Center(child: Text("Settings View (Coming Soon)")),
             ),
           ),
         ],
@@ -1102,245 +1402,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     );
   }
 
-  Widget _buildErrorCard() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.red.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.red.shade100),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.error_outline_rounded,
-            size: 16,
-            color: Colors.red.shade700,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              _error!,
-              style: TextStyle(
-                color: Colors.red.shade700,
-                fontSize: 11,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
-  Widget _buildSidebar(BuildContext context) {
-    return Container(
-      width: 260,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(
-          right: BorderSide(
-            color: Theme.of(context).dividerColor.withValues(alpha: 0.05),
-          ),
-        ),
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(32.0),
-            child: Row(
-              children: [
-                Image.asset('assets/shotpik-agent.png', width: 40, height: 40),
-                const SizedBox(width: 16),
-                Text(
-                  "Shotpik",
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: -0.5,
-                    color: Theme.of(context).colorScheme.onSurface,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          _buildNavSection(context, "MENU"),
-          _buildNavItem(context, Icons.dashboard_rounded, "Dashboard", true),
-          _buildNavItem(
-            context,
-            Icons.history_rounded,
-            "Shared History",
-            false,
-          ),
-          _buildNavItem(context, Icons.settings_outlined, "Settings", false),
-          const Spacer(),
-          _buildUserCard(context),
-        ],
-      ),
-    );
-  }
 
-  Widget _buildNavSection(BuildContext context, String title) => Container(
-    width: double.infinity,
-    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-    child: Text(
-      title,
-      style: TextStyle(
-        fontSize: 11,
-        fontWeight: FontWeight.bold,
-        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
-        letterSpacing: 1.2,
-      ),
-    ),
-  );
 
-  Widget _buildNavItem(
-    BuildContext context,
-    IconData icon,
-    String label,
-    bool active,
-  ) => Container(
-    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-    child: ListTile(
-      leading: Icon(
-        icon,
-        size: 20,
-        color: active
-            ? Theme.of(context).colorScheme.primary
-            : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
-      ),
-      title: Text(
-        label,
-        style: TextStyle(
-          fontSize: 14,
-          fontWeight: active ? FontWeight.bold : FontWeight.w500,
-          color: active
-              ? Theme.of(context).colorScheme.onSurface
-              : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
-        ),
-      ),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      selected: active,
-      selectedTileColor: Theme.of(
-        context,
-      ).colorScheme.primary.withValues(alpha: 0.1),
-      onTap: () {},
-    ),
-  );
-
-  Widget _buildUserCard(BuildContext context) {
-    final email = _authManager.userData?['email'] ?? "agent@shotpik.com";
-    final name =
-        _authManager.userData?['name'] ??
-        _authManager.userData?['sub'] ??
-        "Agent User";
-
-    return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.03),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          CircleAvatar(
-            radius: 18,
-            backgroundColor: Theme.of(
-              context,
-            ).colorScheme.primary.withValues(alpha: 0.1),
-            child: Icon(
-              Icons.person_rounded,
-              size: 18,
-              color: Theme.of(context).colorScheme.primary,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  name,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: Theme.of(context).colorScheme.onSurface,
-                  ),
-                ),
-                Text(
-                  email,
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.onSurface.withValues(alpha: 0.5),
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          IconButton(
-            icon: Icon(
-              Icons.logout_rounded,
-              size: 18,
-              color: Theme.of(
-                context,
-              ).colorScheme.onSurface.withValues(alpha: 0.4),
-            ),
-            onPressed: () => _authManager.logout(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTopBar(BuildContext context) => Container(
-    height: 80,
-    padding: const EdgeInsets.symmetric(horizontal: 32),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border(
-        bottom: BorderSide(
-          color: Theme.of(context).dividerColor.withValues(alpha: 0.05),
-        ),
-      ),
-    ),
-    child: Row(
-      children: [
-        Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              "Tunnel Dashboard",
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: Theme.of(context).colorScheme.onSurface,
-              ),
-            ),
-            Text(
-              "Manage your secure album shares",
-              style: TextStyle(
-                fontSize: 13,
-                color: Theme.of(
-                  context,
-                ).colorScheme.onSurface.withValues(alpha: 0.5),
-              ),
-            ),
-          ],
-        ),
-      ],
-    ),
-  );
 }

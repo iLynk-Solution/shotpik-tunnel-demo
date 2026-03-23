@@ -5,10 +5,14 @@ import 'features/tunnel/presentation/pages/tunnel_page.dart';
 import 'features/auth/logic/auth_manager.dart';
 import 'features/auth/presentation/pages/login_page.dart';
 import 'features/tray/tray_manager.dart';
+import 'core/app_config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
+  
+  // Load RSA keys from local files (public_key.pem / private_key.pem)
+  await AppConfig.loadFromFiles();
 
   windowManager.waitUntilReadyToShow(
     const WindowOptions(
@@ -20,6 +24,7 @@ void main() async {
     () async {
       await windowManager.show();
       await windowManager.focus();
+      await windowManager.setMinimumSize(const Size(1024, 600));
       await windowManager.setPreventClose(
         true, // Ngăn chặn thoát App khi bấm X
       );

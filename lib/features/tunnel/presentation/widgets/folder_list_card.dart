@@ -1,8 +1,15 @@
+import 'dart:convert';
+import 'dart:developer';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import '../../../../core/app_config.dart';
+import '../../../../core/rsa_utils.dart';
 import '../../domain/tunnel_models.dart';
 
 class FolderListCard extends StatelessWidget {
+  final int? currentPort;
   final bool isRunning;
   final Map<String, SharedFolderData> sharedFolders;
   final String apiToken;
@@ -10,9 +17,12 @@ class FolderListCard extends StatelessWidget {
   final VoidCallback onAddFolder;
   final Function(String) onRemoveFolder;
   final Function(String) onRefreshTunnel;
+  final Function(SharedFolderData) onExportFolder;
+  final Set<String> whitelist;
 
   const FolderListCard({
     super.key,
+    required this.currentPort,
     required this.isRunning,
     required this.sharedFolders,
     required this.apiToken,
@@ -20,132 +30,114 @@ class FolderListCard extends StatelessWidget {
     required this.onAddFolder,
     required this.onRemoveFolder,
     required this.onRefreshTunnel,
+    required this.onExportFolder,
+    required this.whitelist,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.02),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildHeader(context),
-          const Divider(height: 1),
-          if (sharedFolders.isEmpty)
-            _buildEmptyState(
-              context,
-              isRunning
-                  ? "No folders shared yet. Click + to add one."
-                  : "Folder list is saved. Start server to share.",
-              Icons.folder_open_rounded,
-            )
-          else
-            Expanded(
-              child: ListView.separated(
-                padding: const EdgeInsets.all(16),
-                itemCount: sharedFolders.length,
-                separatorBuilder: (context, index) =>
-                    const SizedBox(height: 12),
-                itemBuilder: (context, index) {
-                  final folder = sharedFolders.values.elementAt(index);
-                  String urlText;
-                  
-                  if (folder.tunnelUrl != null) {
-                    urlText = folder.tunnelUrl!;
-                  } else if (folder.isConnecting) {
-                    urlText = "Creating Tunnel...";
-                  } else if (!isRunning) {
-                    urlText = "Server Offline";
-                  } else {
-                    urlText = "Tunnel Offline (Ready to Start)";
-                  }
-
-                  // Force rebuild hasUrl logic
-                  bool isAvailable = (folder.tunnelUrl != null && !folder.isConnecting);
-
-                  return _FolderItem(
-                    folder: folder,
-                    url: urlText,
-                    isRunning: isRunning,
-                    isAvailable: isAvailable,
-                    onRemove: () => onRemoveFolder(folder.id),
-                    onRefresh: () => onRefreshTunnel(folder.id),
-                  );
-                },
-              ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildHeader(context),
+        const SizedBox(height: 16),
+        if (sharedFolders.isEmpty)
+          _buildEmptyState(
+            context,
+            isRunning
+                ? "No folders shared yet. Click + to add one."
+                : "Folder list is saved. Start server to share.",
+            Icons.folder_open_rounded,
+          )
+        else
+          ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: sharedFolders.length,
+              separatorBuilder: (context, index) =>
+                  const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                final folder = sharedFolders.values.elementAt(index);
+                String urlText;
+                
+                if (folder.tunnelUrl != null) {
+                  urlText = folder.tunnelUrl!;
+                } else if (folder.isConnecting) {
+                  urlText = "Creating Tunnel...";
+                } else if (!isRunning) {
+                  urlText = "Server Offline";
+                } else {
+                  urlText = "Tunnel Offline (Ready to Start)";
+                }
+    
+                // Force rebuild hasUrl logic
+                bool isAvailable = (folder.tunnelUrl != null && !folder.isConnecting);
+    
+                return _FolderItem(
+                  currentPort: currentPort,
+                  folder: folder,
+                  url: urlText,
+                  isRunning: isRunning,
+                  isAvailable: isAvailable,
+                  isWhitelisted: whitelist.contains(folder.namePath),
+                  onRemove: () => onRemoveFolder(folder.id),
+                  onRefresh: () => onRefreshTunnel(folder.id),
+                  onExport: () => onExportFolder(folder),
+                );
+              },
             ),
-        ],
-      ),
+      ],
     );
   }
 
   Widget _buildHeader(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Row(
-            children: [
-                Icon(
-                Icons.folder_shared_rounded,
-                color: Theme.of(context).colorScheme.primary,
-                size: 20,
-              ),
-              const SizedBox(width: 12),
-              Text(
-                "SHARED ALBUMS",
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 0.5,
-                  color: Theme.of(context).colorScheme.onSurface,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  "${sharedFolders.length}",
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.primary,
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          IconButton(
-            onPressed: isRunning ? onAddFolder : null,
-            icon: Icon(Icons.add_rounded, color: Theme.of(context).colorScheme.primary),
-            style: IconButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
-              padding: const EdgeInsets.all(8),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Row(
+          children: [
+              Icon(
+              Icons.folder_shared_rounded,
+              color: Theme.of(context).colorScheme.primary,
+              size: 20,
             ),
+            const SizedBox(width: 12),
+            Text(
+              "SHARED ALBUMS",
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.5,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              "${sharedFolders.length}",
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.primary,
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+        IconButton(
+          onPressed: isRunning ? onAddFolder : null,
+          icon: Icon(Icons.add_rounded, color: Theme.of(context).colorScheme.primary),
+          style: IconButton.styleFrom(
+            backgroundColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
+            padding: const EdgeInsets.all(8),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
   Widget _buildEmptyState(BuildContext context, String message, IconData icon) {
-    return Expanded(
-      child: Center(
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 40),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -164,20 +156,26 @@ class FolderListCard extends StatelessWidget {
 }
 
 class _FolderItem extends StatelessWidget {
+  final int? currentPort;
   final SharedFolderData folder;
   final String url;
   final bool isRunning;
   final bool isAvailable;
+  final bool isWhitelisted;
   final VoidCallback onRemove;
   final VoidCallback onRefresh;
+  final VoidCallback onExport;
 
   const _FolderItem({
+    required this.currentPort,
     required this.folder,
     required this.url,
     required this.isRunning,
     required this.isAvailable,
+    required this.isWhitelisted,
     required this.onRemove,
     required this.onRefresh,
+    required this.onExport,
   });
 
   @override
@@ -266,6 +264,107 @@ class _FolderItem extends StatelessWidget {
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(),
                 ),
+                const SizedBox(width: 12),
+
+                // Whitelist Toggle Button (Now calling API with confirmation for ADD)
+                IconButton(
+                  onPressed: isRunning ? () async {
+                    if (currentPort == null) return;
+
+                    final isAdding = !isWhitelisted;
+                    
+                    final confirmed = await showDialog<bool>(
+                      context: context,
+                      builder: (context) => AlertDialog(
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        title: Row(
+                          children: [
+                            Icon(
+                              isAdding ? Icons.security_rounded : Icons.remove_moderator_rounded,
+                              color: isAdding ? Colors.blueAccent : Colors.redAccent,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(isAdding ? "Xác nhận Whitelist" : "Gỡ khỏi Whitelist"),
+                          ],
+                        ),
+                        content: Text(isAdding 
+                          ? "Cho phép công khai thư mục '${folder.name}'?\nMọi người có thể download file từ link tunnel này."
+                          : "Bạn có chắc muốn gỡ thư mục '${folder.name}' khỏi Whitelist?\nLink tunnel của thư mục này sẽ không thể download công khai."),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(context, false),
+                            child: const Text("Hủy", style: TextStyle(color: Colors.grey)),
+                          ),
+                          ElevatedButton(
+                            onPressed: () => Navigator.pop(context, true),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: isAdding 
+                                  ? Theme.of(context).colorScheme.primary 
+                                  : Colors.redAccent,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            child: const Text("Đồng ý"),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (confirmed != true) return;
+
+                    final endpoint = isAdding ? "" : "/delete";
+                    final method = isAdding ? "POST" : "DELETE";
+                    
+                    final apiUrl = "http://127.0.0.1:$currentPort/api/v1/whitelist$endpoint";
+                    final body = jsonEncode({"path": folder.namePath});
+                    final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, body);
+
+                    log("--- ${isAdding ? 'ADD' : 'DELETE'} WHITELIST CURL FROM DASHBOARD ---");
+                    log("curl --location --request $method '$apiUrl' \\");
+                    log("--header 'Content-Type: application/json' \\");
+                    log("--header 'X-Signature: $signature' \\");
+                    log("--data '$body'");
+
+                    try {
+                      final response = await (isAdding 
+                        ? http.post(Uri.parse(apiUrl), headers: {"Content-Type": "application/json", "X-Signature": signature}, body: body)
+                        : http.delete(Uri.parse(apiUrl), headers: {"Content-Type": "application/json", "X-Signature": signature}, body: body));
+                      
+                      if (response.statusCode != 200) {
+                        log("Whitelist API error: ${response.body}");
+                      }
+                    } catch (e) {
+                      log("Whitelist API catch error: $e");
+                    }
+                  } : null,
+                  icon: Icon(
+                    isWhitelisted
+                        ? Icons.security_rounded
+                        : Icons.security_outlined,
+                    size: 18,
+                    color: isWhitelisted
+                        ? Theme.of(context).colorScheme.primary
+                        : Colors.grey,
+                  ),
+                  tooltip:
+                      isWhitelisted ? "Gỡ khỏi Whitelist" : "Thêm vào Whitelist",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+                const SizedBox(width: 12),
+                
+                // Export Shortcut Test Button
+                IconButton(
+                  onPressed: isRunning ? onExport : null,
+                  icon: Icon(
+                    Icons.shortcut_rounded,
+                    size: 18,
+                    color: isRunning ? Colors.orangeAccent : Colors.grey,
+                  ),
+                  tooltip: "Tạo Export Shortcut (Test API)",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
               ],
               const SizedBox(width: 12),
               IconButton(
@@ -277,6 +376,7 @@ class _FolderItem extends StatelessWidget {
                 ),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
+                tooltip: "Remove folder",
               ),
             ],
           ),

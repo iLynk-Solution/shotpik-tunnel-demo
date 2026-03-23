@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:file_selector/file_selector.dart';
 
 class AddAlbumDialog extends StatefulWidget {
-  const AddAlbumDialog({super.key});
+  final String? initialPath;
+  const AddAlbumDialog({super.key, this.initialPath});
 
   @override
   State<AddAlbumDialog> createState() => _AddAlbumDialogState();
@@ -28,6 +29,15 @@ class _AddAlbumDialogState extends State<AddAlbumDialog> {
   bool _allowDownloads = true;
   bool _addWatermark = false;
   bool _passwordProtect = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialPath != null) {
+      _folderPathController.text = widget.initialPath!;
+      _nameController.text = widget.initialPath!.split(Platform.pathSeparator).last;
+    }
+  }
 
   @override
   void dispose() {
