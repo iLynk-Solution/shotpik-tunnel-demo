@@ -526,7 +526,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
           // Handle API requests (Always need RSA Auth, except for 'sign' which needs JWT and 'verify' which can report its own fail)
           // /file/ is a public endpoint handled by apiService
-          if (requestPath.startsWith('/api/v1/') || requestPath.startsWith('/file/')) {
+          if (requestPath == '/healthcheck' || requestPath.startsWith('/api/v1/') || requestPath.startsWith('/file/')) {
             final bool isSignRequest = requestPath == '/api/v1/auth/sign';
             final bool isVerifyRequest = requestPath == '/api/v1/auth/verify';
             final bool isFileRequest = requestPath.startsWith('/file/');
@@ -548,7 +548,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                 return;
               }
               // If JWT is valid, we can proceed to sign
-            } else if (!isAuthorized && !isVerifyRequest && !isFileRequest) {
+            } else if (!isAuthorized && !isVerifyRequest && !isFileRequest && requestPath != '/healthcheck') {
               request.response.statusCode = HttpStatus.forbidden;
               request.response.write(
                 '403 Forbidden: RSA Signature invalid or missing.',

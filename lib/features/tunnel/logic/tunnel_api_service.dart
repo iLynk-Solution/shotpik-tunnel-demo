@@ -54,6 +54,11 @@ class TunnelApiService {
     final requestPath = Uri.decodeComponent(request.uri.path);
     onLog("Routing API: Method=${request.method}, Path=$requestPath");
 
+    if (requestPath == '/healthcheck') {
+      if (request.method != 'GET') return _sendMethodNotAllowed(request);
+      return _sendJsonResponse(request, {"status": "ok"});
+    }
+
     if (requestPath == '/api/v1/auth/verify') {
       if (request.method != 'POST') return _sendMethodNotAllowed(request);
       await _handleVerifyAuth(request, isAuthorized, bodyString);
