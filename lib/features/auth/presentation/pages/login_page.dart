@@ -1,10 +1,36 @@
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 import '../../logic/auth_manager.dart';
 
-class LoginPage extends StatelessWidget {
+class LoginPage extends StatefulWidget {
   final AuthManager authManager;
 
   const LoginPage({super.key, required this.authManager});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> with WindowListener {
+  AuthManager get _authManager => widget.authManager;
+
+  @override
+  void initState() {
+    super.initState();
+    windowManager.addListener(this);
+    windowManager.setPreventClose(true);
+  }
+
+  @override
+  void dispose() {
+    windowManager.removeListener(this);
+    super.dispose();
+  }
+
+  @override
+  void onWindowClose() async {
+    await windowManager.hide();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,7 +80,7 @@ class LoginPage extends StatelessWidget {
                 width: double.infinity,
                 height: 50,
                 child: ElevatedButton.icon(
-                  onPressed: () => authManager.loginWeb(),
+                  onPressed: () => _authManager.loginWeb(),
                   icon: const Icon(Icons.login_rounded),
                   label: const Text(
                     "LOGIN WITH WEB",

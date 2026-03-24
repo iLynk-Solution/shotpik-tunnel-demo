@@ -1,102 +1,95 @@
-# Tài liệu API Tunnel (shotpik-tunnel-demo)
+# Tài liệu API Shotpik Tunnel
 
-Hệ thống API cung cấp các phương thức quản lý thư mục chia sẻ (album), tạo shortcut và cung cấp link tải file công khai thông qua Cloudflare Tunnel.
+Tài liệu hướng dẫn các endpoint API để quản lý và truy cập file thông qua Shotpik Tunnel.
 
 ---
 
 ## 1. Cơ chế Bảo mật (RSA Signature)
 
-Tất cả các API nằm trong tiền tố `/api/v1/` (**ngoại trừ API `/file/`**) đều yêu cầu xác thực bằng chữ ký RSA.
+Các API yêu cầu **RSA Signature** bắt buộc phải đính kèm Header:
+`X-Signature: <base64_signature>`
 
-*   **Header bắt buộc:** `X-Signature: <base64_signature>`
-*   **Cách tạo signature:** Ký lên toàn bộ nội dung của Request Body (chuỗi JSON) bằng mã khóa Private Key của App theo thuật toán **RSA-SHA256**. Nếu API là GET hoặc Body rỗng, ký lên một chuỗi rỗng `""`.
-
----
-
-## 2. Quản lý Whitelist (Công khai)
-
-Whitelist là danh sách các thư mục cho phép người dùng bên ngoài tải file mà không cần Token/Signature.
-
-### GET /api/v1/whitelist/list
-Lấy danh sách các thư mục đang được Whitelist.
-*   **Phản hồi:** 
-    ```json
-    {
-      "success": true,
-      "data": [
-        { "id": "...", "name": "...", "name_path": "Summer2024", "path": "...", "url": "..." }
-      ]
-    }
-    ```
-
-### POST /api/v1/whitelist
-Thêm một thư mục vào Whitelist.
-*   **Body:** `{"path": "FolderID_hoặc_NamePath_hoặc_LocalPath"}`
-*   **Phản hồi:** Trả về thông tin thư mục và danh sách `whitelisted` mới nhất.
-
-### DELETE /api/v1/whitelist/delete
-Gỡ một thư mục khỏi Whitelist.
-*   **Body:** `{"path": "..."}`
+- **Thuật toán:** RSA-SHA256.
+- **Cách tạo signature:** Ký lên toàn bộ nội dung của Request Body (chuỗi JSON đã được minify - loại bỏ khoảng trắng và xuống dòng) bằng mã khóa Private Key của App. 
+- **Lưu ý:** Nếu API không có Body hoặc Body rỗng, hãy ký phát hành chữ ký trên một chuỗi rỗng `""`.
 
 ---
 
-## 3. Quản lý Tunnel & Shortcut
+## 2. Danh sách API (Theo thứ tự ưu tiên)
 
-### GET /api/v1/tunnel/list
-Xem danh sách tất cả các thư mục (album) đang được chia sẻ trên App.
-*   **Trường quan trọng:** `whitelisted: true/false` (biết thư mục đã được bảo vệ chưa).
-
-### POST /api/v1/create-folder (Quan trọng)
-Tạo shortcut (symlinks) từ một thư mục gốc vào một thư mục đích để chuẩn bị "xuất bản" (publish).
-*   **Body:** 
-    ```json
-    {
-      "location": "/Đường/dẫn/đích", 
-      "path": "/Đường/dẫn/nguồn",
-      "files": ["file1.jpg", "file2.pdf"] (Nếu rỗng sẽ lấy toàn bộ)
-    }
-    ```
-*   **Điều kiện:** Thư mục `path` (nguồn) phải nằm trong Whitelist.
-*   **Cơ chế tự động:** Thư mục `location` (đích) sẽ tự động được đăng ký vào App và tự động Whitelist sau khi tạo xong. Trả về `name_path` để dùng cho API tải file.
+| Thứ tự | Phương thức | Endpoint | Yêu cầu Xác thực |
+| :--- | :--- | :--- | :--- |
+| 1 | POST | `/api/v1/search` | **RSA Signature** |
+| 2 | POST | `/api/v1/files` | **RSA Signature** |
+| 3 | POST | `/api/v1/whitelist` | **RSA Signature** |
+| 4 | POST | `/api/v1/create-folder` | **RSA Signature** |
+| 5 | GET | `/file/{path}` | Công khai (Public) |
+| 6 | GET | `/healthcheck` | Công khai (Public) |
 
 ---
 
-## 4. API Tải File Công khai (Public API)
+## 3. Chi tiết các Endpoint
 
-Đây là API duy nhất không cần Signature, dùng để nhúng link ảnh/file vào website/app.
+### 1. Tìm kiếm thư mục (`POST /api/v1/search`)
+Dùng để quét và tìm kiếm các thư mục trên máy tính local.
+- **Xác thực:** RSA Signature.
+- **Body mẫu:**
+```json
+{
+  "path": "Wedding_Album", // Từ khóa tìm kiếm
+  "base_path": "/Users/Documents" // Thư mục gốc để quét (Tùy chọn)
+}
+```
 
-### GET /file/{name_path}/{relative_path}
-*   **Ví dụ:** `GET /file/Summer2024_1/photo.jpg`
-*   **Cơ chế hoạt động:**
-    1.  Tìm thư mục có `name_path` là `Summer2024_1` trong Whitelist.
-    2.  Kiểm tra file `photo.jpg` bên trong thư mục đó.
-    3.  **Bắt buộc:** File phải là một **Shortcut (Symlink)** (được tạo qua lệnh `create-folder`).
-*   **Phản hồi:** 
-    ```json
-    {
-      "success": true, 
-      "url": "https://<cloudflare_tunnel_id>.trycloudflare.com/photo.jpg" 
-    }
-    ```
+### 2. Danh sách Album/File (`POST /api/v1/files`)
+Lấy danh sách các Album đã chia sẻ hoặc liệt kê file bên trong một Album.
+- **Xác thực:** RSA Signature.
+- **Body mẫu (Lấy danh sách Album):**
+```json
+{
+  "path": "" 
+}
+```
+- **Body mẫu (Liệt kê file trong Album):**
+```json
+{
+  "path": "wedding_2024" // Tên định danh (slug) của Album
+}
+```
+- **Lưu ý:** Đối với endpoint này, chỉ sử dụng duy nhất key `path` làm định danh ảo. Không sử dụng ID hệ thống hay đường dẫn vật lý.
 
----
+### 3. Quản lý Whitelist (`/api/v1/whitelist/...`)
+Cấp quyền hoặc thu hồi quyền truy cập công khai của Album. Tất cả các endpoint này yêu cầu **RSA Signature**.
 
-## 5. Các biến chính và chức năng
+- **Thêm vào Whitelist (POST `/api/v1/whitelist`):**
+  - Body: `{"path": "slug_cua_album"}`
+- **Danh sách Whitelist (GET `/api/v1/whitelist/list`):**
+  - Trả về danh sách các Album đang được phép truy xuất công khai.
+- **Xóa khỏi Whitelist (DELETE/POST `/api/v1/whitelist/delete`):**
+  - Body: `{"path": "slug_cua_album"}`
+- **Xóa toàn bộ Whitelist (DELETE/POST `/api/v1/whitelist/clear`):**
+  - Dùng để dọn dẹp toàn bộ danh sách cho phép.
 
-| Biến | Chức năng | Ghi chú |
-| :--- | :--- | :--- |
-| `path` | Đường dẫn tuyệt đối hoặc định danh | Dùng trong Request để xác định thư mục nguồn/đích. |
-| `location` | Thư mục chứa Shortcut | Nơi app sẽ tạo các Symlink để publish. |
-| `name_path` | Slug định danh URL | Tên thư mục dùng trong link `/file/`. Ví dụ: `summer2024_1`. |
-| `is_whitelisted`| Trạng thái bảo vệ | Boolean, xác định folder có được phép truy cập công khai không. |
-| `tunnel_url` | Link Cloudflare | Địa chỉ internet để truy cập file từ xa. |
-| `files` | Danh sách file | Lọc các file cụ thể muốn tạo shortcut. |
 
----
+### 4. Tạo thư mục phím tắt (`POST /api/v1/create-folder`)
+Tạo các phím tắt (symlink) từ một thư mục nguồn ngoài hệ thống vào một thư mục do app quản lý để chuẩn bị "xuất bản" (publish).
+- **Xác thực:** RSA Signature.
+- **Body mẫu:**
+```json
+{
+  "location": "/path/to/export", // Thư mục đích (đã whitelist)
+  "path": "/path/to/original",   // Thư mục ảnh gốc (nguồn)
+  "files": ["img1.jpg", "img2.png"] // (Tùy chọn) Lọc file cụ thể
+}
+```
 
-## 6. Luồng hoạt động tiêu chuẩn (Workflow)
+### 5. Truy cập/Tải File (`GET /file/{path}`)
+Link trực tiếp dành cho phía Website hoặc App để hiển thị ảnh.
+- **Xác thực:** Công khai (Public).
+- **Định dạng URL:** `/file/{path}/{relative_sub_path}`
+- **Ví dụ:** `/file/wedding_2024/beach/photo1.jpg`
 
-1.  **Bước 1:** Thêm thư mục gốc (Album ảnh) vào App và bấm biểu tượng khiên (Whitelist).
-2.  **Bước 2:** Gọi API `create-folder` để tạo các Shortcut vào một thư mục rỗng (ví dụ: `Export_Folder`).
-3.  **Bước 3:** Hệ thống tự động Whitelist `Export_Folder` và trả về `name_path`.
-4.  **Bước 4:** Sử dụng `domain:port/file/Export_Folder/ten_anh.jpg` để lấy link ảnh công khai cho web/app của bạn.
+### 6. Kiểm tra dịch vụ (`GET /healthcheck`)
+Endpoint kiểm tra trạng thái hoạt động của server.
+- **Xác thực:** Công khai (Public).
+- **Phản hồi:** `{"status": "ok"}`

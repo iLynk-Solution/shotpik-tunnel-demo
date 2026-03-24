@@ -8,17 +8,24 @@ import '../../domain/tunnel_models.dart';
 import '../../../../core/rsa_utils.dart';
 import '../../../../core/app_config.dart';
 import '../widgets/top_bar.dart';
+import '../widgets/debug_log_view.dart';
 
 class WhitelistPage extends StatefulWidget {
-  final int? currentPort;
   final Set<String> whitelist;
   final Map<String, SharedFolderData> sharedFolders;
+  final List<String> logs;
+  final ScrollController logScrollController;
+  final VoidCallback onClearLogs;
+  final String localApiBase;
 
   const WhitelistPage({
     super.key,
-    required this.currentPort,
     required this.whitelist,
     required this.sharedFolders,
+    required this.logs,
+    required this.logScrollController,
+    required this.onClearLogs,
+    required this.localApiBase,
   });
 
   @override
@@ -46,8 +53,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
   }
 
   Future<void> _fetchWhitelist() async {
-    if (widget.currentPort == null) return;
-    final urlBase = "http://127.0.0.1:${widget.currentPort}/api/v1/whitelist";
+    final urlBase = "${widget.localApiBase}/api/v1/whitelist/list";
 
     // Since GET doesn't have a body, we sign an empty string
     final getSignature = RSAUtils.signBody(AppConfig.rsaPrivateKey, "");
@@ -55,11 +61,11 @@ class _WhitelistPageState extends State<WhitelistPage> {
     log("--- WHITELIST API CURL SAMPLES ---");
     log("1. GET (List):");
     log(
-      "curl --location --request GET '$urlBase/list' --header 'Content-Type: application/json' --header 'X-Signature: $getSignature'",
+      "curl --location --request GET '$urlBase' --header 'Content-Type: application/json' --header 'X-Signature: $getSignature'",
     );
     log("");
     log("2. POST (Set all):");
-    log("curl --location --request POST '$urlBase' \\");
+    log("curl --location --request POST '${widget.localApiBase}/api/v1/whitelist' \\");
     log("--header 'Content-Type: application/json' \\");
     log("--header 'X-Signature: <SIGNATURE_HERE>' \\");
     log("--data '{\"paths\": [\"folder_a\", \"folder_b\"]}'");
@@ -72,7 +78,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
 
     try {
       final response = await http.get(
-        Uri.parse("$urlBase/list"),
+        Uri.parse(urlBase),
         headers: {
           "Content-Type": "application/json",
           "X-Signature": getSignature,
@@ -96,6 +102,79 @@ class _WhitelistPageState extends State<WhitelistPage> {
       log("Whitelist fetch error: $e");
       setState(() {
         _error = "Không thể kết nối tới server.";
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _clearWhitelist() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.delete_sweep_rounded, color: Colors.redAccent),
+            SizedBox(width: 8),
+            const Text("Xóa hết Whitelist"),
+          ],
+        ),
+        content: const Text(
+          "Bạn có chắc muốn xóa toàn bộ danh sách? Các thư mục trong đây sẽ không thể truy cập công khai nữa.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Hủy", style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            child: const Text("Đồng ý"),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+
+    try {
+      final url = "${widget.localApiBase}/api/v1/whitelist/clear";
+      // Clear always uses an empty body which we must sign
+      final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, "");
+
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {
+          "Content-Type": "application/json",
+          "X-Signature": signature,
+        },
+        body: "", // Empty string as body
+      );
+
+      if (response.statusCode == 200) {
+        _fetchWhitelist();
+      } else {
+        setState(() {
+          _error = "API Clear Error (${response.statusCode}): ${response.body}";
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      log("Clear whitelist catch error: $e");
+      setState(() {
+        _error = "Lỗi kết nối khi dọn dẹp whitelist.";
         _isLoading = false;
       });
     }
@@ -129,29 +208,50 @@ class _WhitelistPageState extends State<WhitelistPage> {
           TopBar(
             subtitle: "Manage your shared folders",
             title: "Whitelist folders",
-            child: IconButton(
-              onPressed: _isLoading ? null : _fetchWhitelist,
-              icon: _isLoading
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(
-                      Icons.refresh_rounded,
-                      color: Theme.of(context).colorScheme.primary,
-                      size: 20,
+            child: Row(
+              children: [
+                IconButton(
+                  onPressed: _isLoading ? null : _fetchWhitelist,
+                  icon: _isLoading
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(
+                          Icons.refresh_rounded,
+                          color: Theme.of(context).colorScheme.primary,
+                          size: 20,
+                        ),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Theme.of(
+                      context,
+                    ).colorScheme.primary.withValues(alpha: 0.1),
+                    padding: const EdgeInsets.all(12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
-              style: IconButton.styleFrom(
-                backgroundColor: Theme.of(
-                  context,
-                ).colorScheme.primary.withValues(alpha: 0.1),
-                padding: const EdgeInsets.all(12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  ),
+                  tooltip: "Refresh whitelist",
                 ),
-              ),
-              tooltip: "Refresh whitelist",
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: _isLoading ? null : _clearWhitelist,
+                  icon: Icon(
+                    Icons.delete_sweep_rounded,
+                    color: Colors.redAccent.withValues(alpha: 0.8),
+                    size: 20,
+                  ),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.redAccent.withValues(alpha: 0.1),
+                    padding: const EdgeInsets.all(12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  tooltip: "Clear all whitelist",
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 32),
@@ -285,8 +385,6 @@ class _WhitelistPageState extends State<WhitelistPage> {
                                 color: Colors.redAccent,
                               ),
                               onPressed: () async {
-                                if (widget.currentPort == null) return;
-
                                 final confirmed = await showDialog<bool>(
                                   context: context,
                                   builder: (context) => AlertDialog(
@@ -300,7 +398,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
                                           color: Colors.redAccent,
                                         ),
                                         SizedBox(width: 8),
-                                        Text("Gỡ khỏi Whitelist"),
+                                        const Text("Gỡ khỏi Whitelist"),
                                       ],
                                     ),
                                     content: Text(
@@ -336,7 +434,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
                                 if (confirmed != true) return;
 
                                 final url =
-                                    "http://127.0.0.1:${widget.currentPort}/api/v1/whitelist/delete";
+                                    "${widget.localApiBase}/api/v1/whitelist/delete";
                                 final body = jsonEncode({"path": namePath});
                                 final signature = RSAUtils.signBody(
                                   AppConfig.rsaPrivateKey,
@@ -380,6 +478,15 @@ class _WhitelistPageState extends State<WhitelistPage> {
                       );
                     },
                   ),
+          ),
+          const SizedBox(height: 32),
+          SizedBox(
+            height: 300,
+            child: DebugLogView(
+              logs: widget.logs,
+              scrollController: widget.logScrollController,
+              onClearLogs: widget.onClearLogs,
+            ),
           ),
         ],
       ),

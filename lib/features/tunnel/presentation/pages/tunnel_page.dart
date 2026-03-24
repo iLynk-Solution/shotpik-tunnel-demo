@@ -53,6 +53,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
   final List<String> _logs = [];
   final ScrollController _scroll = ScrollController();
+  final ScrollController _logScroll = ScrollController();
 
   final TextEditingController _searchController = TextEditingController();
   List<dynamic> _searchResults = [];
@@ -64,7 +65,12 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   @override
   void initState() {
     super.initState();
+    // Add AppConfig loading logs first
+    _logs.addAll(AppConfig.loadLogs);
     windowManager.addListener(this);
+    windowManager.setPreventClose(
+      true,
+    ); // Double-ensure we intercept the close button
     AppTrayManager().setTunnelToggleCallback(() {
       _handleTunnelToggle();
     });
@@ -77,7 +83,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     // Log the current RSA key being used
     if (_authManager.authToken != null) {
       log(
-        "AUTH_STATUS: App is using RSA Public Key: ${_authManager.authToken}",
+        "AUTH_STATUS: App is using Auth Token: ${_authManager.authToken}",
       );
     }
 
@@ -178,7 +184,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         _searchRoot = dir;
         // Hiện bảng kết quả ngay với chính thư mục vừa chọn
         _searchResults = [
-          {'path': dir}
+          {'path': dir},
         ];
       });
       log("UI: Search Root updated and added to results panel: $dir");
@@ -202,7 +208,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
       final response = await http.post(
-        Uri.parse("http://127.0.0.1:8888/api/v1/search"),
+        Uri.parse("$_localApiBase/api/v1/search"),
         headers: {"Content-Type": "application/json", "X-Signature": signature},
         body: bodyData,
       );
@@ -252,7 +258,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
         final response = await http.post(
-          Uri.parse("http://127.0.0.1:8888/api/v1/tunnel/create"),
+          Uri.parse("$_localApiBase/api/v1/tunnel/create"),
           headers: {
             "Content-Type": "application/json",
             "X-Signature": signature,
@@ -309,7 +315,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
       final response = await http.post(
-        Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/list"),
+        Uri.parse("$_localApiBase/api/v1/tunnel/list"),
         headers: {"Content-Type": "application/json", "X-Signature": signature},
         body: bodyData,
       );
@@ -374,7 +380,11 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
           "Authorization": "Bearer $token",
           "Content-Type": "application/json",
         },
-        body: jsonEncode({"tunnel_domain": domain}),
+        body: jsonEncode({
+          "tunnel_domain": domain,
+          "local_ip": _localIp,
+          "local_port": _currentPort,
+        }),
       );
       if (response.statusCode == 200 || response.statusCode == 201) {
         log(
@@ -409,7 +419,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   }
 
   void log(String message) {
-    if (!kDebugMode) return;
+    // if (!kDebugMode) return;
     if (!mounted) return;
     debugPrint("TUNNEL LOG: $message");
     setState(() => _logs.add(message));
@@ -426,6 +436,25 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         '${generateByte()}${generateByte()}${generateByte()}${generateByte()}${generateByte()}${generateByte()}';
   }
 
+  String? _localIp;
+
+  Future<String> _getLocalIp() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        includeLoopback: false,
+        type: InternetAddressType.IPv4,
+      );
+      for (var interface in interfaces) {
+        for (var addr in interface.addresses) {
+          if (!addr.isLoopback) return addr.address;
+        }
+      }
+    } catch (_) {}
+    return "localhost";
+  }
+
+  String get _localApiBase => "http://${_localIp ?? 'localhost'}:$_currentPort";
+
   Future<int> _startServer({int bindPort = 0}) async {
     await _server?.close(force: true);
     try {
@@ -435,7 +464,9 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         shared: true,
       );
       final port = _server!.port;
-      log("API SERVER STARTED: http://0.0.0.0:$port");
+      _currentPort = port; // Sync with state
+      _localIp = await _getLocalIp();
+      log("API SERVER STARTED: http://$_localIp:$port (Local Network)");
       log("Use this address for LOCAL API calls.");
 
       _server!.listen((HttpRequest request) async {
@@ -488,7 +519,9 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                 log("API: RSA Signature INVALID.");
                 log("DEBUG Path: $requestPath");
                 log("DEBUG Signature Received: $signature");
-                log("DEBUG Body Received (Len: ${bodyString.length}): |$bodyString|");
+                log(
+                  "DEBUG Body Received (Len: ${bodyString.length}): |$bodyString|",
+                );
               }
             } catch (e) {
               log("API RSA Error: $e");
@@ -508,13 +541,19 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
               });
               await _saveFolders();
             },
+            onUpdateSession: (token) async {
+              await _authManager.updateSession(token);
+            },
             onRemoveFolder: (id) async {
               final folderData = _sharedFolders[id];
               if (folderData != null) {
                 folderData.outSub?.cancel();
                 folderData.errSub?.cancel();
                 folderData.process?.kill();
-                setState(() => _sharedFolders.remove(id));
+                setState(() {
+                  _whitelist.remove(folderData.namePath);
+                  _sharedFolders.remove(id);
+                });
                 _saveFolders();
               }
             },
@@ -526,20 +565,21 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
           // Handle API requests (Always need RSA Auth, except for 'sign' which needs JWT and 'verify' which can report its own fail)
           // /file/ is a public endpoint handled by apiService
-          if (requestPath == '/healthcheck' || requestPath.startsWith('/api/v1/') || requestPath.startsWith('/file/')) {
+          if (requestPath == '/healthcheck' ||
+              requestPath.startsWith('/api/v1/') ||
+              requestPath.startsWith('/file/')) {
             final bool isSignRequest = requestPath == '/api/v1/auth/sign';
             final bool isVerifyRequest = requestPath == '/api/v1/auth/verify';
+            final bool isCallbackRequest = requestPath == '/api/v1/auth/callback';
             final bool isFileRequest = requestPath.startsWith('/file/');
 
             if (isSignRequest) {
               final authHeader = request.headers.value(
                 HttpHeaders.authorizationHeader,
               );
-              final currentToken = _authManager.authToken;
 
-              if (authHeader == null ||
-                  !authHeader.startsWith('Bearer ') ||
-                  authHeader.substring(7) != currentToken) {
+              if (authHeader == null || !authHeader.startsWith('Bearer ')) {
+                log("API: auth/sign - Refused: Missing Bearer token.");
                 request.response.statusCode = HttpStatus.unauthorized;
                 request.response.write(
                   '401 Unauthorized: Invalid or missing Bearer token.',
@@ -547,8 +587,13 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                 await request.response.close();
                 return;
               }
-              // If JWT is valid, we can proceed to sign
-            } else if (!isAuthorized && !isVerifyRequest && !isFileRequest && requestPath != '/healthcheck') {
+              // If we have a Bearer token, we allow signing.
+              // We don't strictly match currentToken to allow sessions to sync/refresh.
+            } else if (!isAuthorized &&
+                !isVerifyRequest &&
+                !isCallbackRequest &&
+                !isFileRequest &&
+                requestPath != '/healthcheck') {
               request.response.statusCode = HttpStatus.forbidden;
               request.response.write(
                 '403 Forbidden: RSA Signature invalid or missing.',
@@ -687,7 +732,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             request.response.write('404 Not Found');
           }
         } catch (e) {
-          log("Req Error: $e");
+          log("Local Server Error: $e");
         } finally {
           try {
             await request.response.close();
@@ -904,7 +949,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       'tunnel',
       '--no-autoupdate',
       '--url',
-      'http://127.0.0.1:$_currentPort',
+      '$_localApiBase',
     ]);
 
     folderData.process = process;
@@ -989,7 +1034,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
         final response = await http.post(
-          Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/create"),
+          Uri.parse("$_localApiBase/api/v1/tunnel/create"),
           headers: {
             "Content-Type": "application/json",
             "X-Signature": signature,
@@ -1081,7 +1126,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       // --- Log Sample CURL for Refresh ---
       log("--- SAMPLE REFRESH CURL ---");
       log(
-        "curl --location --request POST 'http://127.0.0.1:$_currentPort/api/v1/tunnel/refresh' \\",
+        "curl --location --request POST '$_localApiBase/api/v1/tunnel/refresh' \\",
       );
       log("--header 'Content-Type: application/json' \\");
       log("--header 'X-Signature: $signature' \\");
@@ -1089,7 +1134,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       log("---------------------------");
 
       final response = await http.post(
-        Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/refresh"),
+        Uri.parse("$_localApiBase/api/v1/tunnel/refresh"),
         headers: {"Content-Type": "application/json", "X-Signature": signature},
         body: bodyData,
       );
@@ -1194,7 +1239,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
         final response = await http.post(
-          Uri.parse("http://127.0.0.1:$_currentPort/api/v1/create-folder"),
+          Uri.parse("$_localApiBase/api/v1/create-folder"),
           headers: {
             "Content-Type": "application/json",
             "X-Signature": signature,
@@ -1276,7 +1321,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         // --- Log Sample CURL for Delete ---
         log("--- SAMPLE DELETE CURL ---");
         log(
-          "curl --location --request POST 'http://127.0.0.1:$_currentPort/api/v1/tunnel/delete' \\",
+          "curl --location --request POST '$_localApiBase/api/v1/tunnel/delete' \\",
         );
         log("--header 'Content-Type: application/json' \\");
         log("--header 'X-Signature: $signature' \\");
@@ -1284,7 +1329,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
         log("---------------------------");
 
         final response = await http.post(
-          Uri.parse("http://127.0.0.1:$_currentPort/api/v1/tunnel/delete"),
+          Uri.parse("$_localApiBase/api/v1/tunnel/delete"),
           headers: {
             "Content-Type": "application/json",
             "X-Signature": signature,
@@ -1359,8 +1404,10 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
               clipBehavior: Clip.antiAlias,
               child: _selectedIndex == 0
                   ? DashboardView(
-                      currentPort: _currentPort,
                       scrollController: _scroll,
+                      logScrollController: _logScroll,
+                      logs: _logs,
+                      onClearLogs: () => setState(() => _logs.clear()),
                       searchRoot: _searchRoot,
                       onPickSearchRoot: _pickSearchRoot,
                       searchController: _searchController,
@@ -1387,22 +1434,22 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                       onRemoveFolder: _removeFolder,
                       onRefreshTunnel: _refreshTunnel,
                       onExportFolder: _handleExportShortcut,
+                      localApiBase: _localApiBase,
                     )
                   : _selectedIndex == 1
-                      ? WhitelistPage(
-                          currentPort: _currentPort,
-                          whitelist: _whitelist,
-                          sharedFolders: _sharedFolders,
-                        )
-                      : const Center(child: Text("Settings View (Coming Soon)")),
+                  ? WhitelistPage(
+                      whitelist: _whitelist,
+                      sharedFolders: _sharedFolders,
+                      logs: _logs,
+                      logScrollController: _logScroll,
+                      onClearLogs: () => setState(() => _logs.clear()),
+                      localApiBase: _localApiBase,
+                    )
+                  : const Center(child: Text("Settings View (Coming Soon)")),
             ),
           ),
         ],
       ),
     );
   }
-
-
-
-
 }

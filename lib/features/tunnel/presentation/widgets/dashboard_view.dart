@@ -5,13 +5,10 @@ import 'status_config_card.dart';
 import 'folder_list_card.dart';
 import 'top_bar.dart';
 import 'error_card.dart';
-
-// Since SharedFolderData might be in tunnel_models.dart now, we use that.
-// If it's still in a separate file, we'll fix the path.
-// Based on typical refactors, models are often moved to domain/ folder.
+import 'debug_log_view.dart';
 
 class DashboardView extends StatelessWidget {
-  final int? currentPort;
+  final String localApiBase;
   final ScrollController scrollController;
   final String searchRoot;
   final VoidCallback onPickSearchRoot;
@@ -35,11 +32,17 @@ class DashboardView extends StatelessWidget {
   final Function(String) onRemoveFolder;
   final Function(String) onRefreshTunnel;
   final Function(SharedFolderData) onExportFolder;
+  final List<String> logs;
+  final ScrollController logScrollController;
+  final VoidCallback onClearLogs;
 
   const DashboardView({
     super.key,
-    required this.currentPort,
+    required this.localApiBase,
     required this.scrollController,
+    required this.logScrollController,
+    required this.logs,
+    required this.onClearLogs,
     required this.searchRoot,
     required this.onPickSearchRoot,
     required this.searchController,
@@ -242,7 +245,10 @@ class DashboardView extends StatelessWidget {
                                           style: TextStyle(
                                             fontSize: 11,
                                             fontWeight: FontWeight.normal,
-                                            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5),
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .onSurface
+                                                .withValues(alpha: 0.5),
                                           ),
                                         ),
                                       ],
@@ -299,7 +305,7 @@ class DashboardView extends StatelessWidget {
                         ),
                       const SizedBox(height: 24),
                       FolderListCard(
-                        currentPort: currentPort,
+                        localApiBase: localApiBase,
                         isRunning: isRunning,
                         sharedFolders: sharedFolders,
                         apiToken: apiToken,
@@ -308,6 +314,15 @@ class DashboardView extends StatelessWidget {
                         onRemoveFolder: onRemoveFolder,
                         onRefreshTunnel: onRefreshTunnel,
                         onExportFolder: onExportFolder,
+                      ),
+                      const SizedBox(height: 32),
+                      SizedBox(
+                        height: 300,
+                        child: DebugLogView(
+                          logs: logs,
+                          scrollController: logScrollController,
+                          onClearLogs: onClearLogs,
+                        ),
                       ),
                     ],
                   ),

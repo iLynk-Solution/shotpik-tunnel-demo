@@ -97,6 +97,22 @@ class AuthManager extends ChangeNotifier {
     );
   }
 
+  Future<void> updateSession(String token) async {
+    debugPrint("AUTH_MANAGER: Updating session via internal API.");
+    await _saveToken(token);
+    _authToken = token;
+    
+    try {
+      _userData = JwtDecoder.decode(token);
+      debugPrint("AUTH_MANAGER: User info decoded: $_userData");
+    } catch (e) {
+      debugPrint("AUTH_MANAGER: Received token is not a JWT, UI will show default user.");
+      _userData = null;
+    }
+
+    notifyListeners();
+  }
+
   void _handleIncomingLink(Uri? uri) {
     if (uri == null) return;
 

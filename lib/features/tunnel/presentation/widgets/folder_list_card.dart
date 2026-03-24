@@ -9,7 +9,7 @@ import '../../../../core/rsa_utils.dart';
 import '../../domain/tunnel_models.dart';
 
 class FolderListCard extends StatelessWidget {
-  final int? currentPort;
+  final String localApiBase;
   final bool isRunning;
   final Map<String, SharedFolderData> sharedFolders;
   final String apiToken;
@@ -22,7 +22,7 @@ class FolderListCard extends StatelessWidget {
 
   const FolderListCard({
     super.key,
-    required this.currentPort,
+    required this.localApiBase,
     required this.isRunning,
     required this.sharedFolders,
     required this.apiToken,
@@ -51,41 +51,41 @@ class FolderListCard extends StatelessWidget {
           )
         else
           ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: sharedFolders.length,
-              separatorBuilder: (context, index) =>
-                  const SizedBox(height: 12),
-              itemBuilder: (context, index) {
-                final folder = sharedFolders.values.elementAt(index);
-                String urlText;
-                
-                if (folder.tunnelUrl != null) {
-                  urlText = folder.tunnelUrl!;
-                } else if (folder.isConnecting) {
-                  urlText = "Creating Tunnel...";
-                } else if (!isRunning) {
-                  urlText = "Server Offline";
-                } else {
-                  urlText = "Tunnel Offline (Ready to Start)";
-                }
-    
-                // Force rebuild hasUrl logic
-                bool isAvailable = (folder.tunnelUrl != null && !folder.isConnecting);
-    
-                return _FolderItem(
-                  currentPort: currentPort,
-                  folder: folder,
-                  url: urlText,
-                  isRunning: isRunning,
-                  isAvailable: isAvailable,
-                  isWhitelisted: whitelist.contains(folder.namePath),
-                  onRemove: () => onRemoveFolder(folder.id),
-                  onRefresh: () => onRefreshTunnel(folder.id),
-                  onExport: () => onExportFolder(folder),
-                );
-              },
-            ),
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: sharedFolders.length,
+            separatorBuilder: (context, index) => const SizedBox(height: 12),
+            itemBuilder: (context, index) {
+              final folder = sharedFolders.values.elementAt(index);
+              String urlText;
+
+              if (folder.tunnelUrl != null) {
+                urlText = folder.tunnelUrl!;
+              } else if (folder.isConnecting) {
+                urlText = "Creating Tunnel...";
+              } else if (!isRunning) {
+                urlText = "Server Offline";
+              } else {
+                urlText = "Tunnel Offline (Ready to Start)";
+              }
+
+              // Force rebuild hasUrl logic
+              bool isAvailable =
+                  (folder.tunnelUrl != null && !folder.isConnecting);
+
+              return _FolderItem(
+                localApiBase: localApiBase,
+                folder: folder,
+                url: urlText,
+                isRunning: isRunning,
+                isAvailable: isAvailable,
+                isWhitelisted: whitelist.contains(folder.namePath),
+                onRemove: () => onRemoveFolder(folder.id),
+                onRefresh: () => onRefreshTunnel(folder.id),
+                onExport: () => onExportFolder(folder),
+              );
+            },
+          ),
       ],
     );
   }
@@ -96,7 +96,7 @@ class FolderListCard extends StatelessWidget {
       children: [
         Row(
           children: [
-              Icon(
+            Icon(
               Icons.folder_shared_rounded,
               color: Theme.of(context).colorScheme.primary,
               size: 20,
@@ -124,9 +124,14 @@ class FolderListCard extends StatelessWidget {
         ),
         IconButton(
           onPressed: isRunning ? onAddFolder : null,
-          icon: Icon(Icons.add_rounded, color: Theme.of(context).colorScheme.primary),
+          icon: Icon(
+            Icons.add_rounded,
+            color: Theme.of(context).colorScheme.primary,
+          ),
           style: IconButton.styleFrom(
-            backgroundColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
+            backgroundColor: Theme.of(
+              context,
+            ).colorScheme.primary.withValues(alpha: 0.1),
             padding: const EdgeInsets.all(8),
           ),
         ),
@@ -141,12 +146,23 @@ class FolderListCard extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 48, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.1)),
+            Icon(
+              icon,
+              size: 48,
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.1),
+            ),
             const SizedBox(height: 16),
             Text(
               message,
               textAlign: TextAlign.center,
-              style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4), fontSize: 13),
+              style: TextStyle(
+                color: Theme.of(
+                  context,
+                ).colorScheme.onSurface.withValues(alpha: 0.4),
+                fontSize: 13,
+              ),
             ),
           ],
         ),
@@ -156,7 +172,7 @@ class FolderListCard extends StatelessWidget {
 }
 
 class _FolderItem extends StatelessWidget {
-  final int? currentPort;
+  final String localApiBase;
   final SharedFolderData folder;
   final String url;
   final bool isRunning;
@@ -167,7 +183,7 @@ class _FolderItem extends StatelessWidget {
   final VoidCallback onExport;
 
   const _FolderItem({
-    required this.currentPort,
+    required this.localApiBase,
     required this.folder,
     required this.url,
     required this.isRunning,
@@ -223,7 +239,9 @@ class _FolderItem extends StatelessWidget {
                       folder.localPath,
                       style: TextStyle(
                         fontSize: 10,
-                        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5),
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.onSurface.withValues(alpha: 0.5),
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -251,16 +269,23 @@ class _FolderItem extends StatelessWidget {
                     color: Colors.grey,
                   ),
                 const SizedBox(width: 8),
-                
+
                 // Regenerate/Refresh Button
                 IconButton(
-                  onPressed: isRunning && !folder.isConnecting ? onRefresh : null,
+                  onPressed:
+                      isRunning && !folder.isConnecting ? onRefresh : null,
                   icon: Icon(
-                    folder.tunnelUrl == null ? Icons.play_arrow_rounded : Icons.refresh_rounded,
+                    folder.tunnelUrl == null
+                        ? Icons.play_arrow_rounded
+                        : Icons.refresh_rounded,
                     size: 18,
-                    color: isRunning ? Theme.of(context).colorScheme.primary : Colors.grey,
+                    color: isRunning
+                        ? Theme.of(context).colorScheme.primary
+                        : Colors.grey,
                   ),
-                  tooltip: folder.tunnelUrl == null ? "Bắt đầu Tunnel" : "Cấp lại link tunnel",
+                  tooltip: folder.tunnelUrl == null
+                      ? "Bắt đầu Tunnel"
+                      : "Cấp lại link tunnel",
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(),
                 ),
@@ -268,75 +293,117 @@ class _FolderItem extends StatelessWidget {
 
                 // Whitelist Toggle Button (Now calling API with confirmation for ADD)
                 IconButton(
-                  onPressed: isRunning ? () async {
-                    if (currentPort == null) return;
+                  onPressed: isRunning
+                      ? () async {
+                          final isAdding = !isWhitelisted;
 
-                    final isAdding = !isWhitelisted;
-                    
-                    final confirmed = await showDialog<bool>(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                        title: Row(
-                          children: [
-                            Icon(
-                              isAdding ? Icons.security_rounded : Icons.remove_moderator_rounded,
-                              color: isAdding ? Colors.blueAccent : Colors.redAccent,
+                          final confirmed = await showDialog<bool>(
+                            context: context,
+                            builder: (context) => AlertDialog(
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              title: Row(
+                                children: [
+                                  Icon(
+                                    isAdding
+                                        ? Icons.security_rounded
+                                        : Icons.remove_moderator_rounded,
+                                    color: isAdding
+                                        ? Colors.blueAccent
+                                        : Colors.redAccent,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    isAdding
+                                        ? "Xác nhận Whitelist"
+                                        : "Gỡ khỏi Whitelist",
+                                  ),
+                                ],
+                              ),
+                              content: Text(
+                                isAdding
+                                    ? "Cho phép công khai thư mục '${folder.name}'?\nMọi người có thể download file từ link tunnel này."
+                                    : "Bạn có chắc muốn gỡ thư mục '${folder.name}' khỏi Whitelist?\nLink tunnel của thư mục này sẽ không thể download công khai.",
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () =>
+                                      Navigator.pop(context, false),
+                                  child: const Text(
+                                    "Hủy",
+                                    style: TextStyle(color: Colors.grey),
+                                  ),
+                                ),
+                                ElevatedButton(
+                                  onPressed: () => Navigator.pop(context, true),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: isAdding
+                                        ? Theme.of(context).colorScheme.primary
+                                        : Colors.redAccent,
+                                    foregroundColor: Colors.white,
+                                    elevation: 0,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                  ),
+                                  child: const Text("Đồng ý"),
+                                ),
+                              ],
                             ),
-                            const SizedBox(width: 8),
-                            Text(isAdding ? "Xác nhận Whitelist" : "Gỡ khỏi Whitelist"),
-                          ],
-                        ),
-                        content: Text(isAdding 
-                          ? "Cho phép công khai thư mục '${folder.name}'?\nMọi người có thể download file từ link tunnel này."
-                          : "Bạn có chắc muốn gỡ thư mục '${folder.name}' khỏi Whitelist?\nLink tunnel của thư mục này sẽ không thể download công khai."),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context, false),
-                            child: const Text("Hủy", style: TextStyle(color: Colors.grey)),
-                          ),
-                          ElevatedButton(
-                            onPressed: () => Navigator.pop(context, true),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: isAdding 
-                                  ? Theme.of(context).colorScheme.primary 
-                                  : Colors.redAccent,
-                              foregroundColor: Colors.white,
-                              elevation: 0,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                            ),
-                            child: const Text("Đồng ý"),
-                          ),
-                        ],
-                      ),
-                    );
-                    if (confirmed != true) return;
+                          );
+                          if (confirmed != true) return;
 
-                    final endpoint = isAdding ? "" : "/delete";
-                    final method = isAdding ? "POST" : "DELETE";
-                    
-                    final apiUrl = "http://127.0.0.1:$currentPort/api/v1/whitelist$endpoint";
-                    final body = jsonEncode({"path": folder.namePath});
-                    final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, body);
+                          final endpoint = isAdding ? "" : "/delete";
+                          final method = isAdding ? "POST" : "DELETE";
 
-                    log("--- ${isAdding ? 'ADD' : 'DELETE'} WHITELIST CURL FROM DASHBOARD ---");
-                    log("curl --location --request $method '$apiUrl' \\");
-                    log("--header 'Content-Type: application/json' \\");
-                    log("--header 'X-Signature: $signature' \\");
-                    log("--data '$body'");
+                          final apiUrl =
+                              "$localApiBase/api/v1/whitelist$endpoint";
+                          final body = jsonEncode({"path": folder.namePath});
+                          final signature = RSAUtils.signBody(
+                            AppConfig.rsaPrivateKey,
+                            body,
+                          );
 
-                    try {
-                      final response = await (isAdding 
-                        ? http.post(Uri.parse(apiUrl), headers: {"Content-Type": "application/json", "X-Signature": signature}, body: body)
-                        : http.delete(Uri.parse(apiUrl), headers: {"Content-Type": "application/json", "X-Signature": signature}, body: body));
-                      
-                      if (response.statusCode != 200) {
-                        log("Whitelist API error: ${response.body}");
-                      }
-                    } catch (e) {
-                      log("Whitelist API catch error: $e");
-                    }
-                  } : null,
+                          log(
+                            "--- ${isAdding ? 'ADD' : 'DELETE'} WHITELIST CURL FROM DASHBOARD ---",
+                          );
+                          log(
+                            "curl --location --request $method '$apiUrl' \\",
+                          );
+                          log(
+                            "--header 'Content-Type: application/json' \\",
+                          );
+                          log("--header 'X-Signature: $signature' \\");
+                          log("--data '$body'");
+
+                          try {
+                            final response = await (isAdding
+                                ? http.post(
+                                    Uri.parse(apiUrl),
+                                    headers: {
+                                      "Content-Type": "application/json",
+                                      "X-Signature": signature,
+                                    },
+                                    body: body,
+                                  )
+                                : http.delete(
+                                    Uri.parse(apiUrl),
+                                    headers: {
+                                      "Content-Type": "application/json",
+                                      "X-Signature": signature,
+                                    },
+                                    body: body,
+                                  ));
+
+                            if (response.statusCode != 200) {
+                              log("Whitelist API error: ${response.body}");
+                            }
+                          } catch (e) {
+                            log("Whitelist API catch error: $e");
+                          }
+                        }
+                      : null,
                   icon: Icon(
                     isWhitelisted
                         ? Icons.security_rounded
@@ -346,13 +413,14 @@ class _FolderItem extends StatelessWidget {
                         ? Theme.of(context).colorScheme.primary
                         : Colors.grey,
                   ),
-                  tooltip:
-                      isWhitelisted ? "Gỡ khỏi Whitelist" : "Thêm vào Whitelist",
+                  tooltip: isWhitelisted
+                      ? "Gỡ khỏi Whitelist"
+                      : "Thêm vào Whitelist",
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(),
                 ),
                 const SizedBox(width: 12),
-                
+
                 // Export Shortcut Test Button
                 IconButton(
                   onPressed: isRunning ? onExport : null,
@@ -400,7 +468,11 @@ class _FolderItem extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: Theme.of(context).colorScheme.surface,
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Theme.of(context).dividerColor.withValues(alpha: 0.1)),
+                  border: Border.all(
+                    color: Theme.of(
+                      context,
+                    ).dividerColor.withValues(alpha: 0.1),
+                  ),
                 ),
                 child: Row(
                   children: [
@@ -413,10 +485,10 @@ class _FolderItem extends StatelessWidget {
                           fontSize: 11,
                           color: hasUrl
                               ? Theme.of(context).colorScheme.primary
-                              : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
-                          fontStyle: hasUrl
-                              ? FontStyle.normal
-                              : FontStyle.italic,
+                              : Theme.of(
+                                  context,
+                                ).colorScheme.onSurface.withValues(alpha: 0.4),
+                          fontStyle: hasUrl ? FontStyle.normal : FontStyle.italic,
                         ),
                       ),
                     ),
@@ -425,7 +497,9 @@ class _FolderItem extends StatelessWidget {
                       Icon(
                         Icons.copy_rounded,
                         size: 14,
-                        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.5),
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.5),
                       ),
                     ],
                   ],

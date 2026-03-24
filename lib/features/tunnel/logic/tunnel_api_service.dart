@@ -8,20 +8,20 @@ import '../domain/tunnel_models.dart';
 
 class TunnelApiService {
   final Map<String, SharedFolderData> sharedFolders;
+  final Set<String> whitelist;
   final String? mainTunnelUrl;
+  final Function(String) onLog;
   final Future<String?> Function(
     String id,
     String name,
     String namePath,
     String path,
-  )
-  onAddFolder;
+  ) onAddFolder;
   final Future<void> Function(String id) onRemoveFolder;
   final Future<void> Function() onStartService;
   final Future<void> Function(String id) onRefreshTunnel;
   final Future<void> Function(List<String> paths) onUpdateWhitelist;
-  final Set<String> whitelist;
-  final Function(String) onLog;
+  final Future<void> Function(String token) onUpdateSession;
 
   TunnelApiService({
     required this.sharedFolders,
@@ -33,6 +33,7 @@ class TunnelApiService {
     required this.onStartService,
     required this.onRefreshTunnel,
     required this.onUpdateWhitelist,
+    required this.onUpdateSession,
   });
 
   String _generateUuid() {
@@ -51,7 +52,7 @@ class TunnelApiService {
     String bodyString, {
     bool isAuthorized = false,
   }) async {
-    final requestPath = Uri.decodeComponent(request.uri.path);
+    final requestPath = request.uri.path;
     onLog("Routing API: Method=${request.method}, Path=$requestPath");
 
     if (requestPath == '/healthcheck') {
@@ -63,9 +64,20 @@ class TunnelApiService {
       if (request.method != 'POST') return _sendMethodNotAllowed(request);
       await _handleVerifyAuth(request, isAuthorized, bodyString);
       return;
-    }
-
-    if (requestPath == '/api/v1/auth/sign') {
+    } else if (requestPath == '/api/v1/auth/callback') {
+      if (request.method != 'POST') return _sendMethodNotAllowed(request);
+      // This is a special push-token endpoint to fallback from deep link
+      final body = jsonDecode(bodyString);
+      final token = body['token'] as String?;
+      if (token != null) {
+        onLog("API: Received token update via callback/local-push.");
+        await onUpdateSession(token);
+        _sendJsonResponse(request, {"success": true, "message": "Token updated"});
+      } else {
+        _sendJsonResponse(request, {"success": false, "message": "Missing token"}, status: 400);
+      }
+      return;
+    } else if (requestPath == '/api/v1/auth/sign') {
       if (request.method != 'POST') return _sendMethodNotAllowed(request);
       await _handleSignAuth(request, bodyString);
       return;
@@ -127,6 +139,12 @@ class TunnelApiService {
     } else if (requestPath == '/api/v1/whitelist/clear') {
       if (request.method != 'DELETE' && request.method != 'POST') {
         return _sendMethodNotAllowed(request);
+      }
+      if (!isAuthorized) {
+        return _sendJsonResponse(request, {
+          "success": false,
+          "message": "Unauthorized: Missing or invalid signature",
+        }, status: 401);
       }
       await _handleWhitelistClear(request);
     } else if (requestPath == '/api/v1/start-service') {
@@ -359,10 +377,8 @@ class TunnelApiService {
           }
         }
         results.add({
-          "id": folder?.id ?? "",
           "name": folder?.name ?? "",
-          "name_path": namePathItem,
-          "path": folder?.localPath ?? "",
+          "path": namePathItem,
           "url": folder?.tunnelUrl ?? "",
           "created_at": folder?.createdAt.toIso8601String() ?? "",
         });
@@ -416,15 +432,11 @@ class TunnelApiService {
         return;
       }
 
-      SharedFolderData? foundFolder = sharedFolders[path];
-
-      if (foundFolder == null) {
-        for (var f in sharedFolders.values) {
-          // Compare with ID, namePath or full localPath
-          if (f.id == path || f.namePath == path || f.localPath == path) {
-            foundFolder = f;
-            break;
-          }
+      SharedFolderData? foundFolder;
+      for (var f in sharedFolders.values) {
+        if (f.namePath == path) {
+          foundFolder = f;
+          break;
         }
       }
 
@@ -447,10 +459,8 @@ class TunnelApiService {
           "success": true,
           "message": "Added to whitelist",
           "data": {
-            "id": foundFolder.id,
             "name": foundFolder.name,
-            "name_path": foundFolder.namePath,
-            "path": foundFolder.localPath,
+            "path": foundFolder.namePath,
             "url": foundFolder.tunnelUrl ?? "",
             "created_at": foundFolder.createdAt.toIso8601String(),
           },
@@ -501,21 +511,18 @@ class TunnelApiService {
       }
 
       String namePathToRemove = "";
+      SharedFolderData? folder;
 
-      // Try finding by ID, namePath, or localPath
-      SharedFolderData? folder = sharedFolders[path];
-      if (folder == null) {
-        for (var f in sharedFolders.values) {
-          if (f.id == path || f.namePath == path || f.localPath == path) {
-            folder = f;
-            break;
-          }
+      // Try finding by namePath (slug)
+      for (var f in sharedFolders.values) {
+        if (f.namePath == path) {
+          folder = f;
+          namePathToRemove = f.namePath;
+          break;
         }
       }
 
-      if (folder != null) {
-        namePathToRemove = folder.namePath;
-      } else {
+      if (folder == null) {
         // Final fallback: check if the string itself is in the whitelist (for generic namePaths)
         if (whitelist.contains(path)) {
           namePathToRemove = path;
@@ -538,10 +545,8 @@ class TunnelApiService {
         "success": true,
         "message": "Removed from whitelist",
         "data": {
-          "id": folder?.id ?? "",
           "name": folder?.name ?? "",
-          "name_path": namePathToRemove,
-          "path": folder?.localPath ?? "",
+          "path": namePathToRemove,
           "url": folder?.tunnelUrl ?? "",
           "created_at": folder?.createdAt.toIso8601String() ?? "",
         },
@@ -818,11 +823,9 @@ class TunnelApiService {
         _sendJsonResponse(request, {
           "success": true,
           "data": {
-            "id": id,
             "name": name,
-            "name_path": namePath,
+            "path": namePath,
             "type": "folder",
-            "method": "POST",
             "url": fullUrl,
             "created_at": DateTime.now().toIso8601String(),
             "message": "Tunnel created successfully",
@@ -868,13 +871,10 @@ class TunnelApiService {
     final list = sharedFolders.values
         .map(
           (f) => {
-            "id": f.id,
             "name": f.name,
-            "name_path": f.namePath,
+            "path": f.namePath,
             "type": "folder",
-            "method": "POST",
-            "path": f.localPath,
-            "url": f.tunnelUrl,
+            "url": f.tunnelUrl ?? "",
             "status": f.isConnecting
                 ? "connecting"
                 : (f.tunnelUrl != null ? "online" : "offline"),
@@ -1010,6 +1010,13 @@ class TunnelApiService {
         return;
       }
 
+      // Also remove from whitelist if it was there
+      if (whitelist.contains(folder.namePath)) {
+        final List<String> currentWhitelist = whitelist.toList();
+        currentWhitelist.remove(folder.namePath);
+        await onUpdateWhitelist(currentWhitelist);
+      }
+
       await onRemoveFolder(folder.id);
       _sendJsonResponse(request, {
         "success": true,
@@ -1036,19 +1043,17 @@ class TunnelApiService {
 
       final body = jsonDecode(content);
       // Support both 'id' and 'path' from body as the source path
-      String? id = body['path']?.toString() ?? body['id']?.toString();
+      String? id = body['path']?.toString();
 
       // If still empty, return album list
       if (id == null || id.isEmpty) {
         final list = sharedFolders.values
             .map(
               (f) => {
-                "id": f.id,
                 "name": f.name,
-                "name_path": f.namePath,
-                "type": "folder",
                 "path": f.namePath,
-                "url": f.tunnelUrl,
+                "type": "folder",
+                "url": f.tunnelUrl ?? "",
                 "status": f.isConnecting
                     ? "connecting"
                     : (f.tunnelUrl != null ? "online" : "offline"),
@@ -1059,74 +1064,26 @@ class TunnelApiService {
         return;
       }
 
-      onLog("API Files: Request for ID/Path: $id");
-      onLog(
-        "API Files: Currently shared: ${sharedFolders.values.map((f) => f.localPath).toList()}",
-      );
+      onLog("API Files: Request for virtual path: $id");
 
-      SharedFolderData? foundFolder = sharedFolders[id];
+      SharedFolderData? foundFolder;
       String subPathInFolder = "";
 
-      // 0. Try resolving by absolute local path
-      if (foundFolder == null) {
+      // Split identifier from possible sub-path (e.g., "album1/subfolder")
+      final segments = p.split(id).where((s) => s != "/" && s.isNotEmpty).toList();
+      
+      if (segments.isNotEmpty) {
+        final virtualName = segments[0];
+        // Only resolve by namePath (slug)
         for (var f in sharedFolders.values) {
-          // Normalize both for comparison
-          String local = p.normalize(f.localPath);
-          String requested = p.normalize(id);
-
-          if (requested.startsWith(local)) {
+          if (f.namePath == virtualName) {
             foundFolder = f;
-            subPathInFolder = p.relative(requested, from: local);
-            if (subPathInFolder == ".") subPathInFolder = "";
-            onLog(
-              "API Files: Matched by local path! Folder: ${f.name}, SubPath: $subPathInFolder",
-            );
             break;
           }
         }
-      }
-
-      // 1. Try resolving by URL
-      if (foundFolder == null && id.startsWith('http')) {
-        for (var f in sharedFolders.values) {
-          if (f.tunnelUrl != null) {
-            String baseUrl = f.tunnelUrl!;
-            if (baseUrl.endsWith('/')) {
-              baseUrl = baseUrl.substring(0, baseUrl.length - 1);
-            }
-
-            if (id.startsWith(baseUrl)) {
-              foundFolder = f;
-              subPathInFolder = id.substring(baseUrl.length);
-              if (subPathInFolder.startsWith('/')) {
-                subPathInFolder = subPathInFolder.substring(1);
-              }
-              break;
-            }
-          }
-        }
-      }
-
-      // 2. Try resolving by path logic
-      if (foundFolder == null) {
-        final segments = p
-            .split(id)
-            .where((s) => s != "/" && s.isNotEmpty)
-            .toList();
-        if (segments.isNotEmpty) {
-          final virtualName = segments[0];
-          foundFolder = sharedFolders[virtualName];
-          if (foundFolder == null) {
-            for (var f in sharedFolders.values) {
-              if (f.namePath == virtualName || f.name == virtualName) {
-                foundFolder = f;
-                break;
-              }
-            }
-          }
-          if (foundFolder != null) {
-            subPathInFolder = p.joinAll(segments.sublist(1));
-          }
+        
+        if (foundFolder != null) {
+          subPathInFolder = p.joinAll(segments.sublist(1));
         }
       }
 
