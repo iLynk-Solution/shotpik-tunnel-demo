@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
-import 'dart:io';
+
 import 'features/tunnel/presentation/pages/tunnel_page.dart';
 import 'features/auth/logic/auth_manager.dart';
 import 'features/auth/presentation/pages/login_page.dart';
-import 'features/tray/tray_manager.dart';
+
 import 'core/app_config.dart';
 
 void main() async {
@@ -19,21 +19,21 @@ void main() async {
       size: Size(900, 700),
       center: true,
       title: "Shotpik Agent",
-      skipTaskbar: true, // Ẩn khỏi taskbar để chạy ngầm
+      skipTaskbar: false, // Hiện ở taskbar như bình thường
     ),
     () async {
       await windowManager.show();
       await windowManager.focus();
       await windowManager.setMinimumSize(const Size(1024, 600));
       await windowManager.setPreventClose(
-        true, // Ngăn chặn thoát App khi bấm X
+        false, // Thoát hẳn App khi bấm X
       );
     },
   );
 
-  await AppTrayManager().init(() {
-    exit(0);
-  });
+  // await AppTrayManager().init(() {
+  //   exit(0);
+  // });
 
   final authManager = AuthManager();
   await authManager.loadSavedSession();
