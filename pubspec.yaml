@@ -55,6 +55,7 @@ dependencies:
   pointycastle: ^3.9.1
   app_links: ^7.0.0
   shared_preferences: ^2.5.4
+  image: ^4.8.0
 
 dev_dependencies:
   flutter_test:

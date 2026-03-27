@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
-import '../../domain/tunnel_models.dart';
 import 'folder_list_card.dart';
 import 'top_bar.dart';
 import 'error_card.dart';
@@ -16,16 +15,11 @@ class DashboardView extends StatelessWidget {
   final bool isSearching;
   final VoidCallback onClearSearch;
   final bool isRunning;
-  final String? error;
   final List<dynamic> searchResults;
   final VoidCallback onClearSearchResults;
-  final Function(String) onStartSharingForPath;
-  final Map<String, SharedFolderData> sharedFolders;
+  final List<String> watchFolders;
   final String apiToken;
   final Set<String> whitelist;
-  final VoidCallback onAddFolder;
-  final Function(String) onRemoveFolder;
-  final Function(String) onRefreshTunnel;
   final List<String> logs;
   final ScrollController logScrollController;
   final VoidCallback onClearLogs;
@@ -37,22 +31,16 @@ class DashboardView extends StatelessWidget {
     required this.logScrollController,
     required this.logs,
     required this.onClearLogs,
-
     required this.searchController,
     required this.onSearch,
     required this.isSearching,
     required this.onClearSearch,
     required this.isRunning,
-    this.error,
     required this.searchResults,
     required this.onClearSearchResults,
-    required this.onStartSharingForPath,
-    required this.sharedFolders,
+    required this.watchFolders,
     required this.apiToken,
     required this.whitelist,
-    required this.onAddFolder,
-    required this.onRemoveFolder,
-    required this.onRefreshTunnel,
   });
 
   @override
@@ -155,7 +143,7 @@ class DashboardView extends StatelessWidget {
                                 ),
                               )
                             : const Text(
-                                "Tìm",
+                                "Tìm kiếm",
                                 style: TextStyle(fontWeight: FontWeight.bold),
                               ),
                       ),
@@ -163,158 +151,31 @@ class DashboardView extends StatelessWidget {
                   ],
                 ),
               ),
-              const SizedBox(height: 32),
+              const SizedBox(height: 32.0),
               Expanded(
                 child: SingleChildScrollView(
                   controller: scrollController,
-                  physics: const AlwaysScrollableScrollPhysics(),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (error != null) ErrorCard(error: error!),
-                       if (searchResults.isNotEmpty)
-                        Container(
-                          margin: const EdgeInsets.only(top: 24),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Text.rich(
-                                    TextSpan(
-                                      children: [
-                                        const TextSpan(
-                                          text: "Kết quả tìm kiếm",
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const Spacer(),
-                                  TextButton(
-                                    onPressed: onClearSearchResults,
-                                    child: const Text("Xóa kết quả"),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              ListView.separated(
-                                shrinkWrap: true,
-                                physics: const NeverScrollableScrollPhysics(),
-                                itemCount: searchResults.length,
-                                separatorBuilder: (context, index) =>
-                                    const SizedBox(height: 12),
-                                itemBuilder: (context, index) {
-                                  final item = searchResults[index];
-                                  final path = item['path'] as String;
-                                  final name = p.basename(path);
-                                  return Container(
-                                    padding: const EdgeInsets.all(16),
-                                    decoration: BoxDecoration(
-                                      color: Colors.grey.shade50,
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(
-                                        color: Colors.grey.shade100,
-                                      ),
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        Container(
-                                          padding: const EdgeInsets.all(8),
-                                          decoration: BoxDecoration(
-                                            color: Theme.of(
-                                              context,
-                                            ).colorScheme.surface,
-                                            borderRadius:
-                                                BorderRadius.circular(10),
-                                          ),
-                                          child: Icon(
-                                            Icons.folder_rounded,
-                                            size: 18,
-                                            color: Theme.of(
-                                              context,
-                                            ).colorScheme.primary,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                name,
-                                                style: const TextStyle(
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 14,
-                                                ),
-                                              ),
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                path,
-                                                style: TextStyle(
-                                                  fontSize: 10,
-                                                  color: Theme.of(context)
-                                                      .colorScheme
-                                                      .onSurface
-                                                      .withValues(alpha: 0.5),
-                                                ),
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        ElevatedButton(
-                                          onPressed: () =>
-                                              onStartSharingForPath(path),
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: Theme.of(
-                                              context,
-                                            ).colorScheme.primary,
-                                            foregroundColor: Colors.white,
-                                            elevation: 0,
-                                            shape: RoundedRectangleBorder(
-                                              borderRadius:
-                                                  BorderRadius.circular(8),
-                                            ),
-                                          ),
-                                          child: const Text("Thêm"),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                              ),
-                            ],
-                          ),
+                      if (searchResults.isNotEmpty)
+                        _buildSearchResults(context)
+                      else if (searchController.text.isNotEmpty &&
+                          !isSearching)
+                        const ErrorCard(
+                          error:
+                              "Không tìm thấy thư mục nào khớp với từ khóa của bạn.",
                         )
-                      else if (!isSearching &&
-                          searchController.text.isNotEmpty &&
-                          error == null)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 24),
-                          child: ErrorCard(error: "Không tìm thấy kết quả nào"),
-                        ),
-                      if (kDebugMode) ...[
-                        const SizedBox(height: 24),
+                      else
                         FolderListCard(
                           localApiBase: localApiBase,
                           isRunning: isRunning,
-                          sharedFolders: sharedFolders,
-                          apiToken: apiToken,
+                          watchFolders: watchFolders,
                           whitelist: whitelist,
-                          onAddFolder: onAddFolder,
-                          onRemoveFolder: onRemoveFolder,
-                          onRefreshTunnel: onRefreshTunnel,
                         ),
-                        const SizedBox(height: 32),
+                      if (kDebugMode) ...[
+                        const SizedBox(height: 32.0),
                         SizedBox(
-                          height: 300,
+                          height: 400,
                           child: DebugLogView(
                             logs: logs,
                             scrollController: logScrollController,
@@ -330,6 +191,87 @@ class DashboardView extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildSearchResults(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              "KẾT QUẢ TÌM KIẾM",
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.5,
+              ),
+            ),
+            TextButton.icon(
+              onPressed: onClearSearchResults,
+              icon: const Icon(Icons.close_rounded, size: 14),
+              label: const Text("Xóa kết quả", style: TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        ListView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: searchResults.length,
+          itemBuilder: (context, index) {
+            final item = searchResults[index];
+            final path = item['path'] as String;
+            final name = p.basename(path);
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.grey.shade100),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.folder_rounded,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                          Text(
+                            path,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey.shade500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ],
     );
   }
 }
