@@ -1,7 +1,7 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import '../../domain/tunnel_models.dart';
-import 'status_config_card.dart';
 import 'folder_list_card.dart';
 import 'top_bar.dart';
 import 'error_card.dart';
@@ -10,17 +10,12 @@ import 'debug_log_view.dart';
 class DashboardView extends StatelessWidget {
   final String localApiBase;
   final ScrollController scrollController;
-  final String searchRoot;
-  final VoidCallback onPickSearchRoot;
+
   final TextEditingController searchController;
   final VoidCallback onSearch;
   final bool isSearching;
   final VoidCallback onClearSearch;
   final bool isRunning;
-  final bool isConnecting;
-  final String? statusMessage;
-  final VoidCallback onToggleTunnel;
-  final String? tunnelUrl;
   final String? error;
   final List<dynamic> searchResults;
   final VoidCallback onClearSearchResults;
@@ -31,7 +26,6 @@ class DashboardView extends StatelessWidget {
   final VoidCallback onAddFolder;
   final Function(String) onRemoveFolder;
   final Function(String) onRefreshTunnel;
-  final Function(SharedFolderData) onExportFolder;
   final List<String> logs;
   final ScrollController logScrollController;
   final VoidCallback onClearLogs;
@@ -43,17 +37,12 @@ class DashboardView extends StatelessWidget {
     required this.logScrollController,
     required this.logs,
     required this.onClearLogs,
-    required this.searchRoot,
-    required this.onPickSearchRoot,
+
     required this.searchController,
     required this.onSearch,
     required this.isSearching,
     required this.onClearSearch,
     required this.isRunning,
-    required this.isConnecting,
-    this.statusMessage,
-    required this.onToggleTunnel,
-    this.tunnelUrl,
     this.error,
     required this.searchResults,
     required this.onClearSearchResults,
@@ -64,7 +53,6 @@ class DashboardView extends StatelessWidget {
     required this.onAddFolder,
     required this.onRemoveFolder,
     required this.onRefreshTunnel,
-    required this.onExportFolder,
   });
 
   @override
@@ -84,28 +72,6 @@ class DashboardView extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Tooltip(
-                      message: "Chọn thư mục gốc để tìm kiếm ($searchRoot)",
-                      child: IconButton(
-                        onPressed: onPickSearchRoot,
-                        icon: Icon(
-                          Icons.folder_open_rounded,
-                          color: Theme.of(context).colorScheme.primary,
-                          size: 20,
-                        ),
-                        style: IconButton.styleFrom(
-                          backgroundColor: Theme.of(context)
-                              .colorScheme
-                              .primary
-                              .withValues(alpha: 0.1),
-                          padding: const EdgeInsets.all(12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
                     ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 200),
                       child: SizedBox(
@@ -118,40 +84,44 @@ class DashboardView extends StatelessWidget {
                             hintText: "Tìm kiếm thư mục...",
                             hintStyle: TextStyle(
                               fontSize: 13,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurface
-                                  .withValues(alpha: 0.3),
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurface.withValues(alpha: 0.3),
                             ),
-                            prefixIcon:
-                                const Icon(Icons.search_rounded, size: 20),
+                            prefixIcon: const Icon(
+                              Icons.search_rounded,
+                              size: 20,
+                            ),
                             suffixIcon: searchController.text.isNotEmpty
                                 ? IconButton(
-                                    icon: const Icon(Icons.close_rounded,
-                                        size: 16),
+                                    icon: const Icon(
+                                      Icons.close_rounded,
+                                      size: 16,
+                                    ),
                                     onPressed: onClearSearch,
                                   )
                                 : null,
                             filled: true,
                             fillColor: Colors.white,
-                            contentPadding:
-                                const EdgeInsets.symmetric(horizontal: 16),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                            ),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
                               borderSide: BorderSide.none,
                             ),
                             enabledBorder: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
-                              borderSide:
-                                  BorderSide(color: Colors.grey.shade200),
+                              borderSide: BorderSide(
+                                color: Colors.grey.shade200,
+                              ),
                             ),
                             focusedBorder: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
                               borderSide: BorderSide(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .primary
-                                    .withValues(alpha: 0.2),
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.primary.withValues(alpha: 0.2),
                                 width: 2,
                               ),
                             ),
@@ -165,8 +135,9 @@ class DashboardView extends StatelessWidget {
                       child: ElevatedButton(
                         onPressed: isSearching ? null : onSearch,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              Theme.of(context).colorScheme.primary,
+                          backgroundColor: Theme.of(
+                            context,
+                          ).colorScheme.primary,
                           foregroundColor: Colors.white,
                           elevation: 0,
                           padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -200,31 +171,10 @@ class DashboardView extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      StatusConfigCard(
-                        isRunning: isRunning,
-                        isConnecting: isConnecting,
-                        statusMessage: statusMessage ??
-                            (isRunning ? "Tunnel Online" : "Tunnel Offline"),
-                        onToggleTunnel: onToggleTunnel,
-                        tunnelUrl: tunnelUrl,
-                      ),
                       if (error != null) ErrorCard(error: error!),
-                      if (searchResults.isNotEmpty)
+                       if (searchResults.isNotEmpty)
                         Container(
-                          padding: const EdgeInsets.all(20),
                           margin: const EdgeInsets.only(top: 24),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(24),
-                            border: Border.all(color: Colors.grey.shade100),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.02),
-                                blurRadius: 10,
-                                offset: const Offset(0, 4),
-                              ),
-                            ],
-                          ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -238,17 +188,6 @@ class DashboardView extends StatelessWidget {
                                           style: TextStyle(
                                             fontSize: 13,
                                             fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                        TextSpan(
-                                          text: " ($searchRoot)",
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.normal,
-                                            color: Theme.of(context)
-                                                .colorScheme
-                                                .onSurface
-                                                .withValues(alpha: 0.5),
                                           ),
                                         ),
                                       ],
@@ -267,63 +206,122 @@ class DashboardView extends StatelessWidget {
                                 physics: const NeverScrollableScrollPhysics(),
                                 itemCount: searchResults.length,
                                 separatorBuilder: (context, index) =>
-                                    const Divider(),
+                                    const SizedBox(height: 12),
                                 itemBuilder: (context, index) {
                                   final item = searchResults[index];
                                   final path = item['path'] as String;
                                   final name = p.basename(path);
-                                  return ListTile(
-                                    leading: Icon(
-                                      Icons.folder_rounded,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .primary,
-                                    ),
-                                    title: Text(name),
-                                    subtitle: Text(path),
-                                    trailing: ElevatedButton(
-                                      onPressed: () =>
-                                          onStartSharingForPath(path),
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: Theme.of(context)
-                                            .colorScheme
-                                            .primary,
-                                        foregroundColor: Colors.white,
-                                        elevation: 0,
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                        ),
+                                  return Container(
+                                    padding: const EdgeInsets.all(16),
+                                    decoration: BoxDecoration(
+                                      color: Colors.grey.shade50,
+                                      borderRadius: BorderRadius.circular(16),
+                                      border: Border.all(
+                                        color: Colors.grey.shade100,
                                       ),
-                                      child: const Text("Thêm"),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(
+                                            color: Theme.of(
+                                              context,
+                                            ).colorScheme.surface,
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                          ),
+                                          child: Icon(
+                                            Icons.folder_rounded,
+                                            size: 18,
+                                            color: Theme.of(
+                                              context,
+                                            ).colorScheme.primary,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                name,
+                                                style: const TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 14,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                path,
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: Theme.of(context)
+                                                      .colorScheme
+                                                      .onSurface
+                                                      .withValues(alpha: 0.5),
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        ElevatedButton(
+                                          onPressed: () =>
+                                              onStartSharingForPath(path),
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: Theme.of(
+                                              context,
+                                            ).colorScheme.primary,
+                                            foregroundColor: Colors.white,
+                                            elevation: 0,
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                            ),
+                                          ),
+                                          child: const Text("Thêm"),
+                                        ),
+                                      ],
                                     ),
                                   );
                                 },
                               ),
                             ],
                           ),
+                        )
+                      else if (!isSearching &&
+                          searchController.text.isNotEmpty &&
+                          error == null)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 24),
+                          child: ErrorCard(error: "Không tìm thấy kết quả nào"),
                         ),
-                      const SizedBox(height: 24),
-                      FolderListCard(
-                        localApiBase: localApiBase,
-                        isRunning: isRunning,
-                        sharedFolders: sharedFolders,
-                        apiToken: apiToken,
-                        whitelist: whitelist,
-                        onAddFolder: onAddFolder,
-                        onRemoveFolder: onRemoveFolder,
-                        onRefreshTunnel: onRefreshTunnel,
-                        onExportFolder: onExportFolder,
-                      ),
-                      const SizedBox(height: 32),
-                      SizedBox(
-                        height: 300,
-                        child: DebugLogView(
-                          logs: logs,
-                          scrollController: logScrollController,
-                          onClearLogs: onClearLogs,
+                      if (kDebugMode) ...[
+                        const SizedBox(height: 24),
+                        FolderListCard(
+                          localApiBase: localApiBase,
+                          isRunning: isRunning,
+                          sharedFolders: sharedFolders,
+                          apiToken: apiToken,
+                          whitelist: whitelist,
+                          onAddFolder: onAddFolder,
+                          onRemoveFolder: onRemoveFolder,
+                          onRefreshTunnel: onRefreshTunnel,
                         ),
-                      ),
+                        const SizedBox(height: 32),
+                        SizedBox(
+                          height: 300,
+                          child: DebugLogView(
+                            logs: logs,
+                            scrollController: logScrollController,
+                            onClearLogs: onClearLogs,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),

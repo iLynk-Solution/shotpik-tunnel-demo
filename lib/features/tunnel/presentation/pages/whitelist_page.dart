@@ -195,6 +195,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
             }
             return <String, dynamic>{
               'name_path': namePath,
+              'path': f?.localPath ?? '', // Important: Include absolute path
               'name': f?.name ?? '',
               'url': f?.tunnelUrl ?? '',
             };
@@ -314,17 +315,19 @@ class _WhitelistPageState extends State<WhitelistPage> {
                     itemBuilder: (context, index) {
                       final item = items[index];
                       final namePath = item['name_path'] as String? ?? '';
-                      final name = item['name'] as String? ?? namePath;
+                      final absolutePath = item['path'] as String? ?? '';
+                      final name = item['name'] as String? ?? '';
                       final url = item['url'] as String? ?? '';
 
-                      // Find matching local folder for localPath
+                      // Resolve name and folder
                       SharedFolderData? matchingFolder;
                       for (var f in widget.sharedFolders.values) {
-                        if (f.namePath == namePath) {
+                        if (f.namePath == namePath || (absolutePath.isNotEmpty && f.localPath == absolutePath)) {
                           matchingFolder = f;
                           break;
                         }
                       }
+                      final displayName = name.isNotEmpty ? name : (matchingFolder?.name ?? namePath);
 
                       return Container(
                         padding: const EdgeInsets.all(16),
@@ -353,7 +356,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    name.isNotEmpty ? name : namePath,
+                                    displayName,
                                     style: const TextStyle(
                                       fontWeight: FontWeight.bold,
                                       fontSize: 14,
@@ -402,7 +405,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
                                       ],
                                     ),
                                     content: Text(
-                                      "Bạn có chắc muốn gỡ thư mục '$name' khỏi Whitelist?\nLink tunnel của thư mục này sẽ không thể download công khai.",
+                                      "Bạn có chắc muốn gỡ thư mục '$displayName' khỏi Whitelist?\nLink tunnel của thư mục này sẽ không thể download công khai.",
                                     ),
                                     actions: [
                                       TextButton(
@@ -433,25 +436,21 @@ class _WhitelistPageState extends State<WhitelistPage> {
                                 );
                                 if (confirmed != true) return;
 
-                                final url =
-                                    "${widget.localApiBase}/api/v1/whitelist/delete";
-                                final body = jsonEncode({"path": namePath});
-                                final signature = RSAUtils.signBody(
-                                  AppConfig.rsaPrivateKey,
-                                  body,
-                                );
-
-                                log("--- DELETE WHITELIST CURL ---");
-                                log(
-                                  "curl --location --request DELETE '$url' \\",
-                                );
-                                log(
-                                  "--header 'Content-Type: application/json' \\",
-                                );
-                                log("--header 'X-Signature: $signature' \\");
-                                log("--data '$body'");
-
                                 try {
+                                  setState(() {
+                                    _isLoading = true;
+                                  });
+                                  
+                                  // Use absolutePath if available, otherwise namePath (fallback)
+                                  final deleteTarget = absolutePath.isNotEmpty ? absolutePath : namePath;
+                                  final url = "${widget.localApiBase}/api/v1/whitelist/delete";
+                                  final body = jsonEncode({"path": deleteTarget});
+                                  
+                                  final signature = RSAUtils.signBody(
+                                    AppConfig.rsaPrivateKey,
+                                    body,
+                                  );
+
                                   final response = await http.delete(
                                     Uri.parse(url),
                                     headers: {
@@ -460,13 +459,22 @@ class _WhitelistPageState extends State<WhitelistPage> {
                                     },
                                     body: body,
                                   );
-                                  if (response.statusCode != 200) {
-                                    log(
-                                      "Delete whitelist error: ${response.body}",
-                                    );
+                                  
+                                  if (response.statusCode == 200) {
+                                    _fetchWhitelist(); // Refresh UI
+                                  } else {
+                                    log("Delete whitelist error: ${response.body}");
+                                    setState(() {
+                                      _error = "Lỗi khi gỡ whitelist: ${response.statusCode}";
+                                      _isLoading = false;
+                                    });
                                   }
                                 } catch (e) {
                                   log("Delete whitelist catch error: $e");
+                                  setState(() {
+                                    _error = "Lỗi kết nối khi gỡ whitelist.";
+                                    _isLoading = false;
+                                  });
                                 }
                               },
                               tooltip: "Gỡ khỏi Whitelist",

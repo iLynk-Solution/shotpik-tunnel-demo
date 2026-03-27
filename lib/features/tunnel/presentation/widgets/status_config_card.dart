@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 class StatusConfigCard extends StatelessWidget {
   final bool isRunning;
@@ -28,14 +29,7 @@ class StatusConfigCard extends StatelessWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: (isRunning ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurface).withValues(alpha: 0.3),
-            blurRadius: 20,
-            offset: const Offset(0, 10),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(16),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -57,9 +51,9 @@ class StatusConfigCard extends StatelessWidget {
               ),
             ),
           ],
-          if (isRunning && statusMessage == 'Service Ready') ...[
+          if (isRunning || isConnecting) ...[
             const SizedBox(height: 24),
-            _buildGatewayInfo(),
+            _buildGatewayInfo(context),
           ],
         ],
       ),
@@ -118,7 +112,7 @@ class StatusConfigCard extends StatelessWidget {
   }
 
 
-  Widget _buildGatewayInfo() {
+  Widget _buildGatewayInfo(BuildContext context) {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -143,14 +137,56 @@ class StatusConfigCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
-          SelectableText(
-            tunnelUrl ?? "Cài đặt đường truyền...",
-            style: TextStyle(
-              color: tunnelUrl == null ? Colors.white70 : Colors.white,
-              fontWeight: FontWeight.bold,
-              fontSize: 14,
-              fontStyle: tunnelUrl == null ? FontStyle.italic : FontStyle.normal,
-            ),
+          Row(
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    if (tunnelUrl == null)
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    if (tunnelUrl == null) const SizedBox(width: 8),
+                    Expanded(
+                      child: SelectableText(
+                        tunnelUrl ?? "Đang kết nối Cloudflare...",
+                        style: TextStyle(
+                          color: tunnelUrl == null ? Colors.white70 : Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                          fontStyle: tunnelUrl == null ? FontStyle.italic : FontStyle.normal,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (tunnelUrl != null)
+                IconButton(
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: tunnelUrl!));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text("Đã sao chép đường dẫn"),
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                  },
+                  icon: const Icon(
+                    Icons.copy_all_rounded,
+                    color: Colors.white70,
+                    size: 18,
+                  ),
+                  tooltip: "Sao chép",
+                  constraints: const BoxConstraints(),
+                  padding: const EdgeInsets.only(left: 8),
+                ),
+            ],
           ),
         ],
       ),

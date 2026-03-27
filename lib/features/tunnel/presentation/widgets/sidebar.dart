@@ -19,7 +19,7 @@ class TunnelSidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 230,
+      width: 320,
       decoration: BoxDecoration(
         color: Colors.white,
         border: Border(

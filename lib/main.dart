@@ -16,7 +16,7 @@ void main() async {
 
   windowManager.waitUntilReadyToShow(
     const WindowOptions(
-      size: Size(900, 700),
+      size: Size(1200, 700),
       center: true,
       title: "Shotpik Agent",
       skipTaskbar: false, // Hiện ở taskbar như bình thường
@@ -24,7 +24,7 @@ void main() async {
     () async {
       await windowManager.show();
       await windowManager.focus();
-      await windowManager.setMinimumSize(const Size(1024, 600));
+      await windowManager.setMinimumSize(const Size(1200, 600));
       await windowManager.setPreventClose(
         false, // Thoát hẳn App khi bấm X
       );

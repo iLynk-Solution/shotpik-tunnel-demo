@@ -4,9 +4,9 @@ import 'dart:developer';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import '../../../../core/app_config.dart';
-import '../../../../core/rsa_utils.dart';
-import '../../domain/tunnel_models.dart';
+import 'package:shotpik_agent/core/app_config.dart';
+import 'package:shotpik_agent/core/rsa_utils.dart';
+import 'package:shotpik_agent/features/tunnel/domain/tunnel_models.dart';
 
 class FolderListCard extends StatelessWidget {
   final String localApiBase;
@@ -17,7 +17,6 @@ class FolderListCard extends StatelessWidget {
   final VoidCallback onAddFolder;
   final Function(String) onRemoveFolder;
   final Function(String) onRefreshTunnel;
-  final Function(SharedFolderData) onExportFolder;
   final Set<String> whitelist;
 
   const FolderListCard({
@@ -30,7 +29,6 @@ class FolderListCard extends StatelessWidget {
     required this.onAddFolder,
     required this.onRemoveFolder,
     required this.onRefreshTunnel,
-    required this.onExportFolder,
     required this.whitelist,
   });
 
@@ -82,7 +80,6 @@ class FolderListCard extends StatelessWidget {
                 isWhitelisted: whitelist.contains(folder.namePath),
                 onRemove: () => onRemoveFolder(folder.id),
                 onRefresh: () => onRefreshTunnel(folder.id),
-                onExport: () => onExportFolder(folder),
               );
             },
           ),
@@ -180,7 +177,6 @@ class _FolderItem extends StatelessWidget {
   final bool isWhitelisted;
   final VoidCallback onRemove;
   final VoidCallback onRefresh;
-  final VoidCallback onExport;
 
   const _FolderItem({
     required this.localApiBase,
@@ -191,7 +187,6 @@ class _FolderItem extends StatelessWidget {
     required this.isWhitelisted,
     required this.onRemove,
     required this.onRefresh,
-    required this.onExport,
   });
 
   @override
@@ -416,20 +411,6 @@ class _FolderItem extends StatelessWidget {
                   tooltip: isWhitelisted
                       ? "Gỡ khỏi Whitelist"
                       : "Thêm vào Whitelist",
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                ),
-                const SizedBox(width: 12),
-
-                // Export Shortcut Test Button
-                IconButton(
-                  onPressed: isRunning ? onExport : null,
-                  icon: Icon(
-                    Icons.shortcut_rounded,
-                    size: 18,
-                    color: isRunning ? Colors.orangeAccent : Colors.grey,
-                  ),
-                  tooltip: "Tạo Export Shortcut (Test API)",
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(),
                 ),

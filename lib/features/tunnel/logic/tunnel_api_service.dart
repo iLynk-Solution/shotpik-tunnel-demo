@@ -2,9 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:path/path.dart' as p;
-import '../../../core/rsa_utils.dart';
-import '../../../core/app_config.dart';
-import '../domain/tunnel_models.dart';
+import 'package:shotpik_agent/core/rsa_utils.dart';
+import 'package:shotpik_agent/core/app_config.dart';
+import 'package:shotpik_agent/features/tunnel/domain/tunnel_models.dart';
 
 class TunnelApiService {
   final Map<String, SharedFolderData> sharedFolders;
@@ -22,6 +22,7 @@ class TunnelApiService {
   final Future<void> Function(String id) onRefreshTunnel;
   final Future<void> Function(List<String> paths) onUpdateWhitelist;
   final Future<void> Function(String token) onUpdateSession;
+  final List<String> watchFolders;
 
   TunnelApiService({
     required this.sharedFolders,
@@ -34,6 +35,7 @@ class TunnelApiService {
     required this.onRefreshTunnel,
     required this.onUpdateWhitelist,
     required this.onUpdateSession,
+    required this.watchFolders,
   });
 
   String _generateUuid() {
@@ -169,53 +171,82 @@ class TunnelApiService {
       final body = jsonDecode(bodyString);
       final String? query = body['path'];
       if (query == null || query.isEmpty) {
-        _sendJsonResponse(request, {
-          "success": false,
-          "message": "Missing 'path' query",
-        }, status: 400);
+        _sendJsonResponse(
+          request,
+          {"success": false, "message": "Missing 'path' query"},
+          status: 400,
+        );
+        return;
+      }
+
+      if (watchFolders.isEmpty) {
+        onLog("API Search Warning: 'watch_folders' is empty in server.");
+        _sendJsonResponse(request, {"success": true, "data": []});
         return;
       }
 
       final List<Map<String, String>> results = [];
-      final String? basePath = body['base_path'];
-      final rootDir = basePath != null
-          ? Directory(basePath)
-          : Directory.current;
-
-      if (!rootDir.existsSync()) {
-        _sendJsonResponse(request, {
-          "success": false,
-          "message": "Base path does not exist: $basePath",
-        }, status: 400);
-        return;
-      }
-
       onLog(
-        "API: Searching for folders matching '$query' in ${rootDir.path}...",
+        "API: Searching for matching folders in ${watchFolders.length} roots...",
       );
 
-      // Perform recursive search (limited depth for safety)
-      await for (final entity in rootDir.list(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is Directory) {
-          final name = p.basename(entity.path);
-          if (name.toLowerCase().contains(query.toLowerCase())) {
-            results.add({"path": entity.absolute.path, "type": "folder"});
+      for (final rootPath in watchFolders) {
+        final rootDir = Directory(rootPath);
+        if (!rootDir.existsSync()) {
+          onLog("API Search: Root $rootPath does not exist, skipping.");
+          continue;
+        }
+
+        // Perform safe manual recursive search for each root
+        final List<Directory> queue = [rootDir];
+        int processedCount = 0;
+
+        while (queue.isNotEmpty && results.length < 50 && processedCount < 1000) {
+          final currentDir = queue.removeAt(0);
+          processedCount++;
+
+          try {
+            await for (final entity in currentDir.list(
+              recursive: false,
+              followLinks: false,
+            )) {
+              if (entity is Directory) {
+                final path = entity.path;
+                final name = p.basename(path);
+
+                // Skip hidden folders and system/protected folders
+                if (name.startsWith('.') ||
+                    name == 'Library' ||
+                    name == 'Applications' ||
+                    name == 'System' ||
+                    name == 'node_modules') continue;
+
+                if (name.toLowerCase().contains(query.toLowerCase())) {
+                  results.add({"path": entity.absolute.path, "type": "folder"});
+                }
+
+                // Add to queue if results not full yet
+                if (results.length < 50) {
+                  queue.add(entity);
+                }
+              }
+              if (results.length >= 50) break;
+            }
+          } catch (e) {
+            // Ignore individual listing errors
           }
         }
-        // Limit results to 50 for performance
         if (results.length >= 50) break;
       }
 
       _sendJsonResponse(request, {"success": true, "data": results});
     } catch (e) {
       onLog("API Search Error: $e");
-      _sendJsonResponse(request, {
-        "success": false,
-        "message": e.toString(),
-      }, status: 500);
+      _sendJsonResponse(
+        request,
+        {"success": false, "message": e.toString()},
+        status: 500,
+      );
     }
   }
 
@@ -328,13 +359,7 @@ class TunnelApiService {
          return;
       }
 
-      // ENFORCE: Must be a Shortcut (Link)
-      // This ensures we only serve files that were explicitly "published" via create-folder symlinks
-      if (!await FileSystemEntity.isLink(fullPath)) {
-         onLog("API Download: REJECTED. File is not a shortcut: $fullPath");
-         _sendJsonResponse(request, {"success": false, "message": "Access denied: File is not a shortcut (not published)"}, status: 403);
-         return;
-      }
+
 
       // 5. Build the public Tunnel URL
       String publicUrl = "";
@@ -376,10 +401,24 @@ class TunnelApiService {
             break;
           }
         }
+        String publicUrl = "";
+        if (mainTunnelUrl != null && folder != null) {
+          final cleanMain = mainTunnelUrl!.endsWith('/')
+              ? mainTunnelUrl!.substring(0, mainTunnelUrl!.length - 1)
+              : mainTunnelUrl;
+          publicUrl = "$cleanMain${folder.localPath}/";
+        }
+
         results.add({
           "name": folder?.name ?? "",
-          "path": namePathItem,
+          "path": folder?.localPath ?? namePathItem,
+          "name_path": namePathItem, // Added name_path explicitly
+          "type": "folder",
           "url": folder?.tunnelUrl ?? "",
+          "public_url": publicUrl, // Direct gateway access
+          "status": (folder?.isConnecting ?? false)
+              ? "connecting"
+              : (folder != null && folder.tunnelUrl != null ? "online" : "offline"),
           "created_at": folder?.createdAt.toIso8601String() ?? "",
         });
       }
@@ -434,7 +473,8 @@ class TunnelApiService {
 
       SharedFolderData? foundFolder;
       for (var f in sharedFolders.values) {
-        if (f.namePath == path) {
+        // Enforce identification by ABSOLUTE Physical Local Path only
+        if (p.canonicalize(f.localPath) == p.canonicalize(path)) {
           foundFolder = f;
           break;
         }
@@ -460,8 +500,11 @@ class TunnelApiService {
           "message": "Added to whitelist",
           "data": {
             "name": foundFolder.name,
-            "path": foundFolder.namePath,
+            "path": foundFolder.localPath,
             "url": foundFolder.tunnelUrl ?? "",
+            "public_url": mainTunnelUrl != null
+                ? "${mainTunnelUrl!.endsWith('/') ? mainTunnelUrl!.substring(0, mainTunnelUrl!.length - 1) : mainTunnelUrl}${foundFolder.localPath}/"
+                : "",
             "created_at": foundFolder.createdAt.toIso8601String(),
           },
         });
@@ -513,46 +556,45 @@ class TunnelApiService {
       String namePathToRemove = "";
       SharedFolderData? folder;
 
-      // Try finding by namePath (slug)
+      // Enforce identification by ABSOLUTE Physical Local Path only
       for (var f in sharedFolders.values) {
-        if (f.namePath == path) {
+        if (p.canonicalize(f.localPath) == p.canonicalize(path)) {
           folder = f;
           namePathToRemove = f.namePath;
           break;
         }
       }
 
-      if (folder == null) {
-        // Final fallback: check if the string itself is in the whitelist (for generic namePaths)
-        if (whitelist.contains(path)) {
-          namePathToRemove = path;
-        }
-      }
-
-      if (namePathToRemove.isEmpty || !whitelist.contains(namePathToRemove)) {
+      if (folder == null || !whitelist.contains(namePathToRemove)) {
         _sendJsonResponse(request, {
           "success": false,
-          "message": "Item not found in whitelist",
+          "message": "Whitelisted Folder not found by absolute path: $path",
         }, status: 404);
         return;
       }
 
       final List<String> currentWhitelist = whitelist.toList();
       currentWhitelist.remove(namePathToRemove);
+      onLog("API: Updating whitelist in app state...");
       await onUpdateWhitelist(currentWhitelist);
+      onLog("API: App state whitelist updated. Sending response...");
 
       _sendJsonResponse(request, {
         "success": true,
         "message": "Removed from whitelist",
         "data": {
-          "name": folder?.name ?? "",
-          "path": namePathToRemove,
-          "url": folder?.tunnelUrl ?? "",
-          "created_at": folder?.createdAt.toIso8601String() ?? "",
+          "name": folder.name,
+          "path": folder.localPath, // Absolute local path
+          "url": folder.tunnelUrl ?? "",
+          "public_url": mainTunnelUrl != null
+              ? "${mainTunnelUrl!.endsWith('/') ? mainTunnelUrl!.substring(0, mainTunnelUrl!.length - 1) : mainTunnelUrl}${folder.localPath}/"
+              : "",
+          "created_at": folder.createdAt.toIso8601String(),
         },
       });
+      onLog("API: Response sent to response buffer.");
       onLog(
-        "API: DELETE /api/v1/whitelist/delete - Success: $namePathToRemove (Path: ${folder?.localPath ?? ''})",
+        "API: DELETE /api/v1/whitelist/delete - Done: $namePathToRemove",
       );
     } catch (e) {
       _sendJsonResponse(request, {
@@ -598,47 +640,50 @@ class TunnelApiService {
   ) async {
     try {
       final body = jsonDecode(bodyString);
-      final String? destPath = body['location'];
-      final String? sourcePath = body['path'];
-      final List<dynamic>? files = body['files'];
+      final String? destPath = body['path']; // 'path' is now the destination
+      final List<dynamic>? filesInput = body['files'];
 
       if (destPath == null || destPath.isEmpty) {
         _sendJsonResponse(request, {
           "success": false,
-          "message": "Missing 'location'",
+          "message": "Missing 'path' (destination folder)",
         }, status: 400);
         return;
       }
 
-      // --- Whitelist Check for sourcePath ---
-      if (sourcePath != null && sourcePath.isNotEmpty) {
+      // Convert dynamic list to String list of absolute paths
+      final List<String> filesToProcess = (filesInput ?? []).map((e) => e.toString()).toList();
+
+      if (filesToProcess.isEmpty) {
+         _sendJsonResponse(request, {
+          "success": false,
+          "message": "Files list is empty. Provide full absolute paths to whitelisted files.",
+        }, status: 400);
+        return;
+      }
+
+      // 1. Whitelist Check for EVERY file
+      for (final filePath in filesToProcess) {
         bool isWhitelisted = false;
-        
-        // Find folder by localPath, namePath, or ID
-        SharedFolderData? found;
+        // Check if filePath starts with any whitelisted folder's localPath
         for (var f in sharedFolders.values) {
-          if (f.localPath == sourcePath || f.namePath == sourcePath || f.id == sourcePath) {
-            found = f;
+          if (filePath.startsWith(f.localPath) && whitelist.contains(f.namePath)) {
+            isWhitelisted = true;
             break;
           }
-        }
-
-        if (found != null && whitelist.contains(found.namePath)) {
-          isWhitelisted = true;
         }
 
         if (!isWhitelisted) {
           _sendJsonResponse(request, {
             "success": false,
-            "message": "Forbidden: Source path '$sourcePath' is not in whitelist.",
+            "message": "Forbidden: File '$filePath' is not within any whitelisted shared folder.",
           }, status: 403);
-          onLog("API: Create-folder REJECTED. Path not whitelisted: $sourcePath");
+          onLog("API: Create-folder REJECTED. File not whitelisted: $filePath");
           return;
         }
       }
-      // --------------------------------------
 
-      // 1. Create folder if not exists, or CLEAN it if it does
+      // 2. Create destination folder (Ensure parent exists)
       final dir = Directory(destPath);
       if (!await dir.exists()) {
         await dir.create(recursive: true);
@@ -656,80 +701,31 @@ class TunnelApiService {
         }
       }
 
-      // 2. Determine files to process
-      List<String> filesToProcess = [];
-      if (files != null) {
-        filesToProcess = files.map((e) => e.toString()).toList();
-      }
-
-      // 3. "Nếu file rỗng tức là lấy hết" - Take all files from sourcePath if provided
-      if (filesToProcess.isEmpty &&
-          sourcePath != null &&
-          sourcePath.isNotEmpty) {
-        final sourceDir = Directory(sourcePath);
-        if (await sourceDir.exists()) {
-          final entities = await sourceDir.list(recursive: true).toList();
-          filesToProcess = entities
-              .whereType<File>()
-              .map((e) => e.path)
-              .toList();
-          onLog(
-            "API: Taking all ${filesToProcess.length} files (recursive) from $sourcePath",
-          );
-        }
-      }
-
-      // 4. Create shortcut (symlink) into folder
+      // 3. Create shortcut (symlink) into destination folder
       for (final filePath in filesToProcess) {
         final sourceFile = File(filePath);
-
         if (await sourceFile.exists()) {
           final fileName = p.basename(sourceFile.path);
+          // Preserve relative structure? If we want session-001/sub/a.jpg
+          // The user example had "public/uploads/a.pdf".
+          // If the input was absolute, we'll just use the filename for now.
           final targetLinkPath = p.join(dir.path, fileName);
           final link = Link(targetLinkPath);
 
-          // If link already exists, remove it first
           if (await link.exists()) {
-            await link.delete();
+             await link.delete();
           }
-
-          // Create symlink
           await link.create(sourceFile.absolute.path);
-          onLog(
-            "API: Created symlink for $fileName -> ${sourceFile.absolute.path}",
-          );
+          onLog("API: Created symlink for $fileName -> ${sourceFile.absolute.path}");
         } else {
-          onLog("API: File not found for symlink: $filePath");
+          onLog("API: Warning - Source file not found: $filePath");
         }
       }
 
-      // 5. Automatically Add to Shared Folders and Whitelist the destination
-      String? destNamePath;
-      try {
-        final destFolderName = p.basename(destPath);
-        // Create a namePath slug that preserves casing
-        final slug = destFolderName.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
-        destNamePath = slug;
-
-        // Register the folder (this will add it to the global sharedFolders map in the App state)
-        final newId = _generateUuid();
-        await onAddFolder(newId, destFolderName, slug, destPath);
-
-        final List<String> currentWhitelist = whitelist.toList();
-        if (!currentWhitelist.contains(destNamePath)) {
-          currentWhitelist.add(destNamePath);
-          await onUpdateWhitelist(currentWhitelist);
-          onLog("API: Automatically whitelisted destination folder: $destNamePath");
-        }
-      } catch (e) {
-        onLog("API: Warning - Could not automatically register/whitelist destination folder: $e");
-      }
-
+      // 4. Send successful response
       _sendJsonResponse(request, {
         "success": true,
-        "location": destPath,
-        "folder": sourcePath,
-        "name_path": destNamePath, // Inform client of the exact namePath (preserving case)
+        "path": destPath,
       });
     } catch (e) {
       onLog("API Create Folder Shortcut Error: $e");
@@ -824,7 +820,8 @@ class TunnelApiService {
           "success": true,
           "data": {
             "name": name,
-            "path": namePath,
+            "path": path, // Absolute local path
+            "name_path": namePath, // Added name_path explicitly
             "type": "folder",
             "url": fullUrl,
             "created_at": DateTime.now().toIso8601String(),
@@ -872,7 +869,7 @@ class TunnelApiService {
         .map(
           (f) => {
             "name": f.name,
-            "path": f.namePath,
+            "path": f.localPath,
             "type": "folder",
             "url": f.tunnelUrl ?? "",
             "status": f.isConnecting
@@ -946,7 +943,6 @@ class TunnelApiService {
           "name": folder.name,
           "name_path": folder.namePath,
           "type": "folder",
-          "method": "POST",
           "path": folder.localPath,
           "url": folder.tunnelUrl,
         },
@@ -1069,23 +1065,17 @@ class TunnelApiService {
       SharedFolderData? foundFolder;
       String subPathInFolder = "";
 
-      // Split identifier from possible sub-path (e.g., "album1/subfolder")
-      final segments = p.split(id).where((s) => s != "/" && s.isNotEmpty).toList();
-      
-      if (segments.isNotEmpty) {
-        final virtualName = segments[0];
-        // Only resolve by namePath (slug)
-        for (var f in sharedFolders.values) {
-          if (f.namePath == virtualName) {
-            foundFolder = f;
-            break;
-          }
-        }
-        
-        if (foundFolder != null) {
-          subPathInFolder = p.joinAll(segments.sublist(1));
+      // 1. Try matching by absolute localPath (Check if 'id' starts with any localPath)
+      for (var f in sharedFolders.values) {
+        if (id.startsWith(f.localPath)) {
+          foundFolder = f;
+          subPathInFolder = p.relative(id, from: f.localPath);
+          if (subPathInFolder == ".") subPathInFolder = "";
+          break;
         }
       }
+
+
 
       if (foundFolder == null) {
         String msg = "Access denied: Folder or Tunnel not found";
@@ -1124,7 +1114,7 @@ class TunnelApiService {
         if (!isDir && !isFile) continue;
 
         // Calculate relative path from the root of the shared folder
-        final relPath = p.relative(e.path, from: foundFolder.localPath);
+
         final fStat = await e.stat();
 
         String typeAttr = isDir ? "folder" : "file";
@@ -1144,20 +1134,37 @@ class TunnelApiService {
           }
         }
 
+        String? extension;
+        if (isFile) {
+          extension = p.extension(e.path).replaceFirst('.', '').toLowerCase();
+        }
+
         final item = <String, dynamic>{
           "name": name,
           "type": typeAttr,
-          "method": isDir ? "POST" : "GET",
-          "path": relPath,
+          "extension": extension,
+          "path": e.path,
           "size": isDir ? 0 : fStat.size,
           "created_at": fStat.modified.toIso8601String(),
         };
 
         if (foundFolder.tunnelUrl != null) {
           String url = foundFolder.tunnelUrl!;
-          if (!url.endsWith('/')) url += '/';
-          item["url"] = url + relPath.replaceAll('\\', '/');
-          if (isDir) item["url"] += '/';
+          if (url.endsWith('/')) url = url.substring(0, url.length - 1);
+          
+          final String fullPathForUrl = e.path.startsWith('/') ? e.path : '/${e.path}';
+          item["url"] = url + fullPathForUrl.replaceAll('\\', '/');
+          if (isDir && !item["url"].endsWith('/')) item["url"] += '/';
+        }
+
+        // Add Public Gateway URL only if this folder is whitelisted
+        if (whitelist.contains(foundFolder.namePath) && mainTunnelUrl != null) {
+          String gateway = mainTunnelUrl!;
+          if (gateway.endsWith('/')) gateway = gateway.substring(0, gateway.length - 1);
+          
+          final String fullPathForGateway = e.path.startsWith('/') ? e.path : '/${e.path}';
+          item["public_url"] = gateway + fullPathForGateway.replaceAll('\\', '/');
+          if (isDir && !item["public_url"].endsWith('/')) item["public_url"] += '/';
         }
 
         data.add(item);

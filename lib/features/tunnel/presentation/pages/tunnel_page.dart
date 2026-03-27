@@ -3,26 +3,22 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
-
 import 'package:http/http.dart' as http;
-import 'package:file_picker/file_picker.dart';
-import 'package:file_selector/file_selector.dart';
-
-import '../../../auth/logic/auth_manager.dart';
-import '../../../tray/tray_manager.dart';
-import '../../../../core/rsa_utils.dart';
-import '../../../../core/app_config.dart';
-import '../../domain/tunnel_models.dart';
-import '../../logic/tunnel_api_service.dart';
-import '../widgets/add_album_dialog.dart';
-import '../widgets/sidebar.dart';
-import 'whitelist_page.dart';
-import '../widgets/dashboard_view.dart';
+import 'package:shotpik_agent/features/auth/logic/auth_manager.dart';
+import 'package:shotpik_agent/features/tray/tray_manager.dart';
+import 'package:shotpik_agent/core/rsa_utils.dart';
+import 'package:shotpik_agent/core/app_config.dart';
+import 'package:shotpik_agent/features/tunnel/domain/tunnel_models.dart';
+import 'package:shotpik_agent/features/tunnel/logic/tunnel_api_service.dart';
+import 'package:shotpik_agent/features/tunnel/presentation/widgets/add_album_dialog.dart';
+import 'package:shotpik_agent/features/tunnel/presentation/widgets/sidebar.dart';
+import 'package:shotpik_agent/features/tunnel/presentation/pages/whitelist_page.dart';
+import 'package:shotpik_agent/features/tunnel/presentation/widgets/dashboard_view.dart';
+import 'package:shotpik_agent/features/tunnel/presentation/pages/settings_page.dart';
 
 class TunnelHome extends StatefulWidget {
   final AuthManager authManager;
@@ -58,9 +54,10 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   final TextEditingController _searchController = TextEditingController();
   List<dynamic> _searchResults = [];
   bool _isSearching = false;
-  String _searchRoot = Platform.environment['HOME'] ?? Directory.current.path;
+
 
   int _selectedIndex = 0;
+  final List<String> _watchFolders = [];
 
   @override
   void initState() {
@@ -135,6 +132,13 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       _whitelist.addAll(whitelist);
     }
 
+    // Load Watch Folders for Search API
+    final List<String>? watchFolders = prefs.getStringList('watch_folders');
+    if (watchFolders != null) {
+      _watchFolders.clear();
+      _watchFolders.addAll(watchFolders);
+    }
+
     // Initial status info
     setState(() {
       _statusMessage ??= "Local API Ready";
@@ -177,19 +181,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     super.dispose();
   }
 
-  Future<void> _pickSearchRoot() async {
-    final String? dir = await getDirectoryPath();
-    if (dir != null) {
-      setState(() {
-        _searchRoot = dir;
-        // Hiện bảng kết quả ngay với chính thư mục vừa chọn
-        _searchResults = [
-          {'path': dir},
-        ];
-      });
-      log("UI: Search Root updated and added to results panel: $dir");
-    }
-  }
+
 
   Future<void> _handleSearchAction() async {
     final query = _searchController.text.trim();
@@ -202,9 +194,12 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
     setState(() => _isSearching = true);
 
-    log("UI: Searching for folders matching '$query' in '$_searchRoot'...");
+    log("UI: Searching for '$query'...");
+    
     try {
-      final bodyData = jsonEncode({"path": query, "base_path": _searchRoot});
+      final bodyData = jsonEncode({
+        "path": query,
+      });
       final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
 
       final response = await http.post(
@@ -215,8 +210,9 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
       if (response.statusCode == 200) {
         final Map<String, dynamic> body = jsonDecode(response.body);
+        final List<dynamic> data = body['data'] ?? [];
         setState(() {
-          _searchResults = body['data'] ?? [];
+          _searchResults = data;
           _isSearching = false;
         });
       } else {
@@ -535,11 +531,14 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             onLog: log,
             onAddFolder: _registerLocalFolder,
             onUpdateWhitelist: (paths) async {
+              log("UI Callback: onUpdateWhitelist - Start (New length: ${paths.length})");
               setState(() {
                 _whitelist.clear();
                 _whitelist.addAll(paths);
               });
+              log("UI Callback: onUpdateWhitelist - State set. Saving...");
               await _saveFolders();
+              log("UI Callback: onUpdateWhitelist - Done.");
             },
             onUpdateSession: (token) async {
               await _authManager.updateSession(token);
@@ -561,6 +560,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             onRefreshTunnel: (id) async {
               await _startTunnelForFolder(id);
             },
+            watchFolders: _watchFolders,
           );
 
           // Handle API requests (Always need RSA Auth, except for 'sign' which needs JWT and 'verify' which can report its own fail)
@@ -636,7 +636,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             }
           }
 
-          // 2. Fallback to URL path segment (for local access)
+          // 2. Fallback to URL path segment (for local access or slug-based URL)
           if (folderData == null && pathSegments.isNotEmpty) {
             final virtualName = pathSegments[0];
             folderData = _sharedFolders[virtualName];
@@ -646,6 +646,16 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                   folderData = f;
                   break;
                 }
+              }
+            }
+          }
+
+          // 3. Fallback: Match by absolute localPath prefix (for Direct Absolute Path access)
+          if (folderData == null) {
+            for (var f in _sharedFolders.values) {
+              if (requestPath.startsWith(f.localPath)) {
+                folderData = f;
+                break;
               }
             }
           }
@@ -680,18 +690,34 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
               folderData.tunnelUrl != null &&
               folderData.tunnelUrl!.contains(hostOnly);
 
-          if (matchedByDomain) {
+          bool matchedByAbsolutePath = false;
+          for (var f in _sharedFolders.values) {
+            if (requestPath.startsWith(f.localPath)) {
+              matchedByAbsolutePath = true;
+              break;
+            }
+          }
+
+          if (matchedByDomain || matchedByAbsolutePath) {
             subPath = requestPath;
           } else if (pathSegments.isNotEmpty) {
             subPath = p.joinAll(pathSegments.sublist(1));
           }
 
-          // Strip leading slashes
-          while (subPath.startsWith('/')) {
+          // Strip leading slashes ONLY for relative paths (to avoid p.join issues)
+          // But preserve it if it's potentially an absolute path we want to match
+          if (subPath.startsWith('/') && !subPath.startsWith(folderData.localPath)) {
             subPath = subPath.substring(1);
           }
 
-          final fullPath = p.join(folderData.localPath, subPath);
+          // Resolve the physical absolute path on disk
+          String fullPath;
+          if (subPath.startsWith(folderData.localPath)) {
+            fullPath = subPath; // User requested absolute path via URL
+          } else {
+             fullPath = p.join(folderData.localPath, subPath); // User requested relative path via slug
+          }
+          
           final entityType = FileSystemEntity.typeSync(fullPath);
           final bool isFileRequest = entityType == FileSystemEntityType.file;
 
@@ -1156,132 +1182,6 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     }
   }
 
-  Future<void> _handleExportShortcut(SharedFolderData folder) async {
-    String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
-
-    if (selectedDirectory == null) {
-      log("UI: Export cancelled (no directory selected).");
-      return;
-    }
-
-    if (!mounted) return;
-
-    final TextEditingController pathController = TextEditingController(
-      text: p.join(selectedDirectory, "session-${folder.namePath}"),
-    );
-
-    final bool? confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Tạo Export Shortcut"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "Nhập đường dẫn thư mục export:",
-              style: TextStyle(fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: pathController,
-              decoration: const InputDecoration(
-                isDense: true,
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              "Hệ thống sẽ lấy danh sách file trong album này để tạo shortcut (symlink) vào thư mục trên.",
-              style: TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text("Hủy"),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text("Tạo Shortcut"),
-          ),
-        ],
-      ),
-    );
-
-    if (!mounted) return;
-
-    if (confirm == true) {
-      final exportPath = pathController.text;
-      if (exportPath.isEmpty) return;
-
-      log("UI: Testing Export API (/api/v1/create-folder)...");
-      try {
-        if (_currentPort == null) {
-          log("UI Export Error: Server port not available.");
-          return;
-        }
-
-        // Prepare file list from the local folder
-        final dir = Directory(folder.localPath);
-        if (!await dir.exists()) {
-          log("UI Export Error: Thư mục nguồn không tồn tại.");
-          return;
-        }
-
-        final bodyData = jsonEncode({
-          "path": folder.localPath, // Source path
-          "location": exportPath, // Destination path
-          "files": [], // Send empty to tell server to "lấy hết" (take all)
-        });
-
-        final signature = RSAUtils.signBody(AppConfig.rsaPrivateKey, bodyData);
-
-        final response = await http.post(
-          Uri.parse("$_localApiBase/api/v1/create-folder"),
-          headers: {
-            "Content-Type": "application/json",
-            "X-Signature": signature,
-          },
-          body: bodyData,
-        );
-
-        if (!mounted) return;
-
-        if (response.statusCode == 200) {
-          final absoluteExportPath = Directory(exportPath).absolute.path;
-          log(
-            "API SUCCESS: Export Shortcut created successfully at $absoluteExportPath",
-          );
-
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text("Đã tạo shortcut tại $absoluteExportPath"),
-                action: SnackBarAction(
-                  label: "Mở thư mục",
-                  onPressed: () async {
-                    if (Platform.isMacOS) {
-                      await Process.run('open', [absoluteExportPath]);
-                    } else if (Platform.isWindows) {
-                      await Process.run('explorer.exe', [absoluteExportPath]);
-                    }
-                  },
-                ),
-                duration: const Duration(seconds: 10),
-              ),
-            );
-          }
-        } else {
-          log("API ERROR (${response.statusCode}): ${response.body}");
-        }
-      } catch (e) {
-        log("UI Export Request Error: $e");
-      }
-    }
-  }
-
   void _removeFolder(String id) async {
     final folder = _sharedFolders[id];
     if (folder == null) return;
@@ -1402,14 +1302,14 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
             child: Container(
               decoration: const BoxDecoration(color: Colors.white),
               clipBehavior: Clip.antiAlias,
-              child: _selectedIndex == 0
-                  ? DashboardView(
+              child: () {
+                switch (_selectedIndex) {
+                  case 0:
+                    return DashboardView(
                       scrollController: _scroll,
                       logScrollController: _logScroll,
                       logs: _logs,
                       onClearLogs: () => setState(() => _logs.clear()),
-                      searchRoot: _searchRoot,
-                      onPickSearchRoot: _pickSearchRoot,
                       searchController: _searchController,
                       onSearch: _handleSearchAction,
                       isSearching: _isSearching,
@@ -1418,10 +1318,6 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                         setState(() => _searchResults = []);
                       },
                       isRunning: _isRunning,
-                      isConnecting: _isConnecting,
-                      statusMessage: _statusMessage,
-                      onToggleTunnel: _handleTunnelToggle,
-                      tunnelUrl: _mainTunnelUrl,
                       error: _error,
                       searchResults: _searchResults,
                       onClearSearchResults: () =>
@@ -1433,19 +1329,33 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                       onAddFolder: _startSharing,
                       onRemoveFolder: _removeFolder,
                       onRefreshTunnel: _refreshTunnel,
-                      onExportFolder: _handleExportShortcut,
                       localApiBase: _localApiBase,
-                    )
-                  : _selectedIndex == 1
-                  ? WhitelistPage(
+                    );
+                  case 1:
+                    return WhitelistPage(
                       whitelist: _whitelist,
                       sharedFolders: _sharedFolders,
                       logs: _logs,
                       logScrollController: _logScroll,
                       onClearLogs: () => setState(() => _logs.clear()),
                       localApiBase: _localApiBase,
-                    )
-                  : const Center(child: Text("Settings View (Coming Soon)")),
+                    );
+                  case 2:
+                    return SettingsPage(
+                      isRunning: _isRunning,
+                      isConnecting: _isConnecting,
+                      statusMessage: _statusMessage,
+                      onToggleTunnel: _handleTunnelToggle,
+                      tunnelUrl: _mainTunnelUrl,
+                      onWatchFoldersChanged: (folders) {
+                        _watchFolders.clear();
+                        _watchFolders.addAll(folders);
+                      },
+                    );
+                  default:
+                    return const Center(child: Text("Page Not Found"));
+                }
+              }(),
             ),
           ),
         ],
