@@ -5,6 +5,7 @@ class TunnelSidebar extends StatelessWidget {
   final ValueChanged<int> onIndexChanged;
   final String? userName;
   final String? userEmail;
+  final String? userAvatar;
   final VoidCallback onLogout;
 
   const TunnelSidebar({
@@ -13,6 +14,7 @@ class TunnelSidebar extends StatelessWidget {
     required this.onIndexChanged,
     this.userName,
     this.userEmail,
+    this.userAvatar,
     required this.onLogout,
   });
 
@@ -149,11 +151,14 @@ class TunnelSidebar extends StatelessWidget {
           CircleAvatar(
             radius: 18,
             backgroundColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
-            child: Icon(
-              Icons.person_rounded,
-              size: 18,
-              color: Theme.of(context).colorScheme.primary,
-            ),
+            backgroundImage: userAvatar != null ? NetworkImage(userAvatar!) : null,
+            child: userAvatar == null
+                ? Icon(
+                    Icons.person_rounded,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.primary,
+                  )
+                : null,
           ),
           const SizedBox(width: 12),
           Expanded(

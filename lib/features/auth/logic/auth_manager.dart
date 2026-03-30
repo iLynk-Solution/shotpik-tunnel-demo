@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:app_links/app_links.dart';
-import 'package:jwt_decoder/jwt_decoder.dart'; // Restore JWT decoder
+import 'package:jwt_decoder/jwt_decoder.dart'; 
+import 'package:http/http.dart' as http;
 
 class AuthManager extends ChangeNotifier {
   String? _authToken;
@@ -49,13 +51,39 @@ class AuthManager extends ChangeNotifier {
       }
       notifyListeners();
       debugPrint("AUTH_MANAGER: Session restored.");
+      // Fetch fresh profile info
+      fetchProfile();
     } else {
       debugPrint("AUTH_MANAGER: No saved session found.");
     }
 
-    // IMPORTANT: Only start listening to deep links AFTER loading the saved session
-    // to ensure _lastProcessedUri is correctly populated first.
     _initDeepLinks();
+  }
+
+  Future<void> fetchProfile() async {
+    if (_authToken == null) return;
+    
+    debugPrint("AUTH_MANAGER: Fetching latest profile from server...");
+    try {
+      final response = await http.get(
+        Uri.parse("https://shotpik.com/api/v1/profile"),
+        headers: {
+          'Authorization': 'Bearer $_authToken',
+          'Accept': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        _userData = data;
+        notifyListeners();
+        debugPrint("AUTH_MANAGER: Profile fetched and updated: ${_userData?['data']?['name']}");
+      } else {
+        debugPrint("AUTH_MANAGER: Failed to fetch profile (${response.statusCode}): ${response.body}");
+      }
+    } catch (e) {
+      debugPrint("AUTH_MANAGER: Error fetching profile: $e");
+    }
   }
 
   Future<void> loginWeb() async {
@@ -111,6 +139,8 @@ class AuthManager extends ChangeNotifier {
     }
 
     notifyListeners();
+    // Fetch fresh profile info
+    fetchProfile();
   }
 
   void _handleIncomingLink(Uri? uri) {
@@ -150,6 +180,8 @@ class AuthManager extends ChangeNotifier {
 
         debugPrint("AUTH_MANAGER: Login successful.");
         notifyListeners();
+        // Fetch fresh profile info
+        fetchProfile();
       } else {
         debugPrint("AUTH_MANAGER: Deep link received but no token found.");
       }

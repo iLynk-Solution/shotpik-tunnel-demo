@@ -23,25 +23,34 @@ class AppConfig {
   static Future<void> loadFromFiles() async {
     loadLogs.clear();
     try {
-      final String cwd = Directory.current.path;
-      loadLogs.add("APP_CONFIG: CWD: $cwd");
-
-      // Potential locations for the .pem files (prioritize external files)
-      final List<String> searchDirs = [
-        cwd, // Current working directory
-      ];
+      final List<String> searchDirs = [];
+      
+      // In debug mode, prioritize current folder (usually project root)
+      if (kDebugMode) {
+        final String cwd = Directory.current.path;
+        loadLogs.add("APP_CONFIG: CWD: $cwd");
+        searchDirs.add(cwd);
+      }
 
       // On MacOS, if we're in a bundle, look next to the .app bundle as well
       if (Platform.isMacOS) {
-        final String exePath = Platform.resolvedExecutable;
-        final String exeDir = p.dirname(exePath);
-        searchDirs.add(exeDir); // ShotpikAgent.app/Contents/MacOS/
+        try {
+          final String exePath = Platform.resolvedExecutable;
+          if (exePath.isNotEmpty) {
+            final String exeDir = p.dirname(exePath);
+            searchDirs.add(exeDir); // ShotpikAgent.app/Contents/MacOS/
 
-        // ShotpikAgent.app is usually 3 levels up from the binary
-        final String bundleDir = p.dirname(p.dirname(p.dirname(exePath)));
-        final String bundleParentDir = p.dirname(bundleDir);
-        searchDirs.add(bundleParentDir); // The folder containing ShotpikAgent.app
-        loadLogs.add("APP_CONFIG: Bundle Parent: $bundleParentDir");
+            // ShotpikAgent.app is usually 3 levels up from the binary
+            final String bundleDir = p.dirname(p.dirname(p.dirname(exePath)));
+            if (bundleDir.length > 1) {
+              final String bundleParentDir = p.dirname(bundleDir);
+              searchDirs.add(bundleParentDir); // The folder containing ShotpikAgent.app
+              loadLogs.add("APP_CONFIG: Bundle Parent: $bundleParentDir");
+            }
+          }
+        } catch (e) {
+          loadLogs.add("APP_CONFIG: Error resolving macOS bundle path: $e");
+        }
       }
 
       // --- PUBLIC KEY ---

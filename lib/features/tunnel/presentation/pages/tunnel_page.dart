@@ -235,9 +235,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
         bool isAuthorized = false;
         if (signature.isNotEmpty) {
-          final publicKeyStr = File(p.join(Directory.current.path, 'public_key.pem')).existsSync()
-              ? File(p.join(Directory.current.path, 'public_key.pem')).readAsStringSync()
-              : '';
+          final publicKeyStr = AppConfig.rsaPublicKey;
           if (publicKeyStr.isNotEmpty) {
             isAuthorized = RSAUtils.verifySignature(publicKeyStr, bodyString, signature);
           }
@@ -290,8 +288,12 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
           TunnelSidebar(
             selectedIndex: _selectedIndex,
             onIndexChanged: (idx) => setState(() => _selectedIndex = idx),
-            userName: _authManager.userData?['name'] ?? _authManager.userData?['sub'],
-            userEmail: _authManager.userData?['email'],
+            userName: _authManager.userData?['data']?['name'] ?? 
+                      _authManager.userData?['name'] ?? 
+                      _authManager.userData?['sub'],
+            userEmail: _authManager.userData?['data']?['email'] ?? 
+                       _authManager.userData?['email'],
+            userAvatar: _authManager.userData?['data']?['avatar_url'],
             onLogout: () => _authManager.logout(),
           ),
           Expanded(
