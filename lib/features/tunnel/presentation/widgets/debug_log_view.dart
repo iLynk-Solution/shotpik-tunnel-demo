@@ -75,7 +75,7 @@ class DebugLogView extends StatelessWidget {
               Icon(Icons.terminal_rounded, size: 14, color: Colors.grey),
               SizedBox(width: 8),
               Text(
-                "SYSTEM CONSOLE",
+                "BẢN TIN HỆ THỐNG",
                 style: TextStyle(
                   color: Colors.grey, 
                   fontSize: 10, 
@@ -93,7 +93,7 @@ class DebugLogView extends StatelessWidget {
                   if (logs.isNotEmpty) {
                     Clipboard.setData(ClipboardData(text: logs.join('\n')));
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("Logs copied to clipboard")),
+                      const SnackBar(content: Text("Đã sao chép log vào bộ nhớ tạm")),
                     );
                   }
                 },
