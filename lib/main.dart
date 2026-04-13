@@ -38,6 +38,12 @@ class _TunnelInternalAppState extends State<TunnelInternalApp> {
       debugPrint("STEP: Initializing Window Manager...");
       await windowManager.ensureInitialized();
       
+      // Cấu hình kích thước cửa sổ ngay lập tức để tránh hiệu ứng "nhảy" kích thước
+      await windowManager.setSize(const Size(1200, 700));
+      await windowManager.setMinimumSize(const Size(1000, 600));
+      await windowManager.center();
+      await windowManager.setTitle("Shotpik Agent");
+
       debugPrint("STEP: Loading App Config...");
       await AppConfig.loadFromFiles();
       
@@ -53,26 +59,14 @@ class _TunnelInternalAppState extends State<TunnelInternalApp> {
         });
       }
 
-      // Khởi tạo các thành phần Native sau một độ trễ ngắn để đảm bảo UI đã render
-      Future.delayed(const Duration(milliseconds: 800), () async {
-        debugPrint("STEP: Secondary Native Init Starting...");
+      // Chỉ trì hoãn việc HIỆN cửa sổ để đảm bảo UI đã sẵn sàng
+      Future.delayed(const Duration(milliseconds: 400), () async {
+        debugPrint("STEP: Showing Window...");
         try {
-          const windowOptions = WindowOptions(
-            size: Size(1200, 700),
-            center: true,
-            title: "Shotpik Agent",
-          );
-
-          await windowManager.waitUntilReadyToShow(windowOptions, () async {
-            await windowManager.show();
-            await windowManager.focus();
-            debugPrint("STEP: Window Manager ReadyToShow.");
-          });
-
-          // Removed AppTrayManager as per user request
-          debugPrint("STEP: Tray Manager Skipped.");
+          await windowManager.show();
+          await windowManager.focus();
         } catch (e) {
-          debugPrint("NATIVE_INIT_ERROR: $e");
+          debugPrint("WINDOW_SHOW_ERROR: $e");
         }
       });
     } catch (e, stack) {
