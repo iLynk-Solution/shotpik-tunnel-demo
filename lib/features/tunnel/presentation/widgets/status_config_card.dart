@@ -65,7 +65,7 @@ class StatusConfigCard extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          "SERVICE STATUS",
+          "TRẠNG THÁI DỊCH VỤ",
           style: TextStyle(
             color: Colors.white.withValues(alpha: 0.5),
             fontSize: 10,
@@ -80,8 +80,8 @@ class StatusConfigCard extends StatelessWidget {
             const SizedBox(width: 12),
             Text(
               isRunning
-                  ? "TUNNEL ONLINE"
-                  : (isConnecting ? "CONNECTING..." : "OFFLINE"),
+                  ? "TUNNEL ĐANG CHẠY"
+                  : (isConnecting ? "ĐANG KẾT NỐI..." : "ĐANG TẮT"),
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 18,
@@ -105,7 +105,7 @@ class StatusConfigCard extends StatelessWidget {
         elevation: 0,
       ),
       child: Text(
-        isRunning ? "STOP SERVICE" : "START SERVICE",
+        isRunning ? "DỪNG DỊCH VỤ" : "BẮT ĐẦU DỊCH VỤ",
         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
       ),
     );
@@ -127,7 +127,7 @@ class StatusConfigCard extends StatelessWidget {
               const Icon(Icons.link, color: Colors.indigoAccent, size: 16),
               const SizedBox(width: 8),
               Text(
-                "GATEWAY DOMAIN",
+                "TÊN MIỀN GATEWAY",
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.6),
                   fontSize: 10,

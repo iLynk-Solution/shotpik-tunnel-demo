@@ -71,7 +71,7 @@ class FolderListCard extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             Text(
-              "WATCH FOLDERS",
+              "THƯ MỤC THEO DÕI",
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.bold,

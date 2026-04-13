@@ -2,14 +2,15 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:http/http.dart' as http;
 import 'package:shotpik_agent/features/auth/logic/auth_manager.dart';
-import 'package:shotpik_agent/features/tray/tray_manager.dart';
 import 'package:shotpik_agent/core/rsa_utils.dart';
 import 'package:shotpik_agent/core/app_config.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart';
 import 'package:shotpik_agent/features/tunnel/logic/tunnel_api_service.dart';
 import 'package:shotpik_agent/features/tunnel/presentation/widgets/sidebar.dart';
 import 'package:shotpik_agent/features/tunnel/presentation/pages/whitelist_page.dart';
@@ -54,12 +55,14 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     super.initState();
     _logs.addAll(AppConfig.loadLogs);
     windowManager.addListener(this);
-    windowManager.setPreventClose(true);
-    AppTrayManager().setTunnelToggleCallback(() => _handleTunnelToggle());
-    AppTrayManager().setExitCallback(() => _exitApp());
+    // windowManager.setPreventClose(true); // Removed to allow normal closing
+    // AppTrayManager().setTunnelToggleCallback(() => _handleTunnelToggle());
+    // AppTrayManager().setExitCallback(() => _exitApp());
     _authManager.addListener(_onAuthChanged);
     _loadFolders();
-    _startEverything();
+    
+    // TỰ ĐỘNG BẬT DỊCH VỤ
+    _startEverything(); 
   }
 
   Future<void> _loadFolders() async {
@@ -79,7 +82,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     }
 
     setState(() {
-      _statusMessage ??= "Local API Ready";
+      _statusMessage ??= "Local API đã sẵn sàng";
     });
   }
 
@@ -108,15 +111,15 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     if (_isConnecting) return;
     setState(() => _isConnecting = true);
     try {
-      final port = await _startServer(bindPort: 8888);
+      // 1. Dùng cổng 0 (ngẫu nhiên) để không bao giờ bị trùng cổng
+      final port = await _startServer(bindPort: 0);
       _currentPort = port;
       _isRunning = true;
-      _statusMessage = "Local Server Port: $port";
+      _statusMessage = "Server đang chạy (Cổng $port)";
       
-      // Start Cloudflare Tunnel
-      await _startTunnelProcess(port);
-      
-      _updateTrayMenu();
+      // 2. KÍCH HOẠT LẠI Cloudflared
+      await _startTunnelProcess(port); 
+      // _updateTrayMenu(); // Removed tray
     } catch (e) {
       _statusMessage = "Error: $e";
       _isRunning = false;
@@ -125,12 +128,50 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     }
   }
 
+  Future<String?> _getCloudflaredPath() async {
+    try {
+      // 1. Kiểm tra trong bundle trước (MacOS)
+      if (Platform.isMacOS) {
+         final exePath = Platform.resolvedExecutable;
+         final contentsDir = p.dirname(p.dirname(exePath));
+         final bundledPath = p.join(contentsDir, 'Resources', 'flutter_assets', 'assets', 'bin', 'cloudflared');
+         if (await File(bundledPath).exists()) {
+             // Thử làm cho nó có quyền thực thi (nếu có thể)
+             await Process.run('chmod', ['+x', bundledPath]);
+             return bundledPath;
+         }
+      }
+
+      // 2. Nếu không tìm thấy trong bundle hoặc platform khác, thử copy từ assets ra ApplicationSupport
+      final supportDir = await getApplicationSupportDirectory();
+      final targetPath = p.join(supportDir.path, 'cloudflared');
+      
+      // Luôn copy bản mới nhất từ assets để đảm bảo quyền thực thi và tính nhất quán
+      final data = await rootBundle.load('assets/bin/cloudflared');
+      final bytes = data.buffer.asUint8List();
+      await File(targetPath).writeAsBytes(bytes);
+      await Process.run('chmod', ['+x', targetPath]);
+      
+      return targetPath;
+    } catch (e) {
+      log("SYSTEM: Lỗi khi tìm/cài đặt cloudflared: $e");
+      return null;
+    }
+  }
+
   Future<void> _startTunnelProcess(int port) async {
     try {
-      log("SYSTEM: Starting Cloudflare Tunnel for port $port...");
+      final cloudflaredPath = await _getCloudflaredPath();
+      if (cloudflaredPath == null) {
+        log("SYSTEM: Không thể tìm thấy binary cloudflared");
+        return;
+      }
+
+      log("SYSTEM: Đang khởi động Cloudflare Tunnel ($cloudflaredPath) cho cổng $port...");
+      
       _tunnelProcess = await Process.start(
-        'cloudflared',
-        ['tunnel', '--url', 'http://localhost:$port'],
+        cloudflaredPath,
+        ['tunnel', '--url', 'http://127.0.0.1:$port'],
       );
 
       _tunnelProcess!.stdout.transform(utf8.decoder).listen((data) {
@@ -139,14 +180,13 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
       _tunnelProcess!.stderr.transform(utf8.decoder).listen((data) {
         log("CLOUDFLARED ERROR: $data");
-        // Look for the URL in stderr (cloudflared outputs the URL there)
         final urlMatch = RegExp(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com').firstMatch(data);
         if (urlMatch != null) {
           final url = urlMatch.group(0);
           if (url != null && _mainTunnelUrl != url) {
             setState(() {
               _mainTunnelUrl = url;
-              _statusMessage = "Tunnel Online: $url";
+              _statusMessage = "Tunnel đang hoạt động: $url";
             });
             _saveFolders();
           }
@@ -154,18 +194,20 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       });
 
       _tunnelProcess!.exitCode.then((code) {
-        log("SYSTEM: Cloudflare Tunnel exited with code $code");
+        log("SYSTEM: Cloudflare Tunnel kết thúc với mã lỗi $code");
         if (_isRunning) {
           setState(() {
             _isRunning = false;
-            _statusMessage = "Tunnel process crashed (Exit: $code)";
+            _statusMessage = "Dịch vụ đã dừng (Mã lỗi $code)";
           });
         }
       });
     } catch (e) {
-      log("SYSTEM: Failed to start cloudflared: $e");
-      _statusMessage = "Failed to start cloudflared. Make sure it is installed.";
-      rethrow;
+      log("SYSTEM: Lỗi khởi động cloudflared: $e");
+      setState(() {
+        _statusMessage = "Không thể tìm thấy cloudflared";
+        _isRunning = false;
+      });
     }
   }
 
@@ -203,9 +245,10 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
     }
   }
 
-  Future<void> _updateTrayMenu() async {
-    await AppTrayManager().updateTrayMenu(isRunning: _isRunning);
-  }
+  // Tray menu removed
+  // Future<void> _updateTrayMenu() async {
+  //   await AppTrayManager().updateTrayMenu(isRunning: _isRunning);
+  // }
 
   Future<void> _exitApp() async {
     await _stopEverything();
@@ -214,7 +257,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
 
   @override
   void onWindowClose() async {
-    await windowManager.hide();
+    // Thay vì ẩn đi, chúng ta thoát app hoàn toàn
+    await _exitApp();
   }
 
   void log(String message) {
@@ -228,7 +272,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
   Future<int> _startServer({int bindPort = 0}) async {
     await _server?.close(force: true);
     try {
-      _server = await HttpServer.bind(InternetAddress.anyIPv4, bindPort);
+      _server = await HttpServer.bind(InternetAddress.loopbackIPv4, bindPort);
       _server!.listen((HttpRequest request) async {
         final signature = request.headers.value('X-Signature') ?? '';
         final bodyString = await utf8.decodeStream(request);
@@ -274,9 +318,8 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
       setState(() {
         _isRunning = false;
         _isConnecting = false;
-        _statusMessage = "Service Stopped";
+        _statusMessage = "Dịch vụ đã dừng";
       });
-      _updateTrayMenu();
     }
   }
 
@@ -344,7 +387,7 @@ class _TunnelHomeState extends State<TunnelHome> with WindowListener {
                       },
                     );
                   default:
-                    return const Center(child: Text("Page Not Found"));
+                    return const Center(child: Text("Không tìm thấy trang"));
                 }
               }(),
             ),

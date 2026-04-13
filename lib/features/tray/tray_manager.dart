@@ -7,8 +7,8 @@ class AppTrayManager {
   factory AppTrayManager() => _instance;
   AppTrayManager._internal();
 
-  final SystemTray _systemTray = SystemTray();
-  final Menu _menu = Menu();
+  late final SystemTray _systemTray = SystemTray();
+  late final Menu _menu = Menu();
 
   bool _isInitialized = false;
   bool _isRunning = false;
@@ -58,12 +58,12 @@ class AppTrayManager {
   Future<void> _buildMenu() async {
     await _menu.buildFrom([
       MenuItemLabel(
-        label: _isRunning ? 'Status: SERVER ACTIVE' : 'Status: OFFLINE',
+        label: _isRunning ? 'Trạng thái: ĐANG CHẠY' : 'Trạng thái: ĐÃ TẮT',
         enabled: false,
       ),
       MenuSeparator(),
       MenuItemLabel(
-        label: _isRunning ? 'Stop Service' : 'Start Service',
+        label: _isRunning ? 'Dừng dịch vụ' : 'Bắt đầu dịch vụ',
         onClicked: (menuItem) {
           if (_onToggleTunnel != null) {
               _onToggleTunnel!();
@@ -71,12 +71,12 @@ class AppTrayManager {
         },
       ),
       MenuItemLabel(
-        label: 'Show Window',
+        label: 'Hiện cửa sổ',
         onClicked: (menuItem) => windowManager.show(),
       ),
       MenuSeparator(),
       MenuItemLabel(
-        label: 'Exit',
+        label: 'Thoát',
         onClicked: (menuItem) {
            if (_onExitApp != null) {
               _onExitApp!();

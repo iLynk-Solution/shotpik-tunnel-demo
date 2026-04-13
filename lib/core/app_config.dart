@@ -1,7 +1,12 @@
 import 'dart:io';
+import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path/path.dart' as p;
+import 'package:pointycastle/export.dart';
+import 'package:pointycastle/asn1.dart';
 
 class AppConfig {
   /// The RSA Public Key used for verification.
@@ -25,81 +30,130 @@ class AppConfig {
     try {
       final List<String> searchDirs = [];
       
-      // In debug mode, prioritize current folder (usually project root)
+      // In debug mode, prioritize current folder
       if (kDebugMode) {
-        final String cwd = Directory.current.path;
-        loadLogs.add("APP_CONFIG: CWD: $cwd");
-        searchDirs.add(cwd);
+        try {
+          final String cwd = Directory.current.path;
+          searchDirs.add(cwd);
+        } catch (_) {}
       }
 
-      // On MacOS, if we're in a bundle, look next to the .app bundle as well
+      // On MacOS, safely try to get bundle path
       if (Platform.isMacOS) {
         try {
           final String exePath = Platform.resolvedExecutable;
           if (exePath.isNotEmpty) {
             final String exeDir = p.dirname(exePath);
-            searchDirs.add(exeDir); // ShotpikAgent.app/Contents/MacOS/
-
-            // ShotpikAgent.app is usually 3 levels up from the binary
-            final String bundleDir = p.dirname(p.dirname(p.dirname(exePath)));
+            searchDirs.add(exeDir);
+            
+            final String contentsDir = p.dirname(exeDir);
+            final String bundleDir = p.dirname(contentsDir);
             if (bundleDir.length > 1) {
-              final String bundleParentDir = p.dirname(bundleDir);
-              searchDirs.add(bundleParentDir); // The folder containing ShotpikAgent.app
-              loadLogs.add("APP_CONFIG: Bundle Parent: $bundleParentDir");
+              searchDirs.add(p.dirname(bundleDir));
             }
           }
-        } catch (e) {
-          loadLogs.add("APP_CONFIG: Error resolving macOS bundle path: $e");
-        }
+        } catch (_) {}
       }
 
-      // --- PUBLIC KEY ---
+      // Safe loading defaults
+      rsaPublicKey = "";
+      rsaPrivateKey = "";
+
+      // 1. Try Assets FIRST (Vì assets luôn an toàn nhất trong bundle)
+      try {
+        rsaPublicKey = await _loadFromAssets('assets/keys/public_key.pem');
+        rsaPrivateKey = await _loadFromAssets('assets/keys/private_key.pem');
+      } catch (_) {}
+
+      // 2. ONLY check files if assets failed and we have search dirs
       if (rsaPublicKey.isEmpty) {
-        // 1. Check external files first
         rsaPublicKey = await _findAndReadFile('public_key.pem', searchDirs);
-        
-        // 2. Fallback to assets if not found externally
-        if (rsaPublicKey.isEmpty) {
-          rsaPublicKey = await _loadFromAssets('assets/keys/public_key.pem');
-          if (rsaPublicKey.isNotEmpty) {
-            loadLogs.add("APP_CONFIG: Loaded Public Key from App Assets");
-          }
-        } else {
-          loadLogs.add("APP_CONFIG: Loaded Public Key from File System");
-        }
-
-        if (rsaPublicKey.isEmpty) {
-          loadLogs.add("APP_CONFIG: WARNING - Public Key NOT FOUND anywhere");
-        }
-      } else {
-        loadLogs.add("APP_CONFIG: Public Key provided via dart-define");
       }
-
-      // --- PRIVATE KEY ---
       if (rsaPrivateKey.isEmpty) {
-        // 1. Check external files first
         rsaPrivateKey = await _findAndReadFile('private_key.pem', searchDirs);
-
-        // 2. Fallback to assets if not found externally
-        if (rsaPrivateKey.isEmpty) {
-          rsaPrivateKey = await _loadFromAssets('assets/keys/private_key.pem');
-          if (rsaPrivateKey.isNotEmpty) {
-            loadLogs.add("APP_CONFIG: Loaded Private Key from App Assets");
-          }
-        } else {
-          loadLogs.add("APP_CONFIG: Loaded Private Key from File System");
-        }
-
-        if (rsaPrivateKey.isEmpty) {
-          loadLogs.add("APP_CONFIG: WARNING - Private Key NOT FOUND anywhere");
-        }
-      } else {
-        loadLogs.add("APP_CONFIG: Private Key provided via dart-define");
       }
+
+      // 3. Nếu vẫn TRỐNG, tự động tạo Key mới cho máy này
+      if (rsaPublicKey.isEmpty || rsaPrivateKey.isEmpty) {
+        await _generateAndSaveNewKeys();
+      }
+
     } catch (e) {
-      loadLogs.add("APP_CONFIG_LOAD_ERROR: $e");
-      debugPrint("APP_CONFIG_LOAD_ERROR: $e");
+      // Tuyệt đối không để crash ở đây
+      debugPrint("APP_CONFIG_SILENT_ERROR: $e");
     }
+  }
+
+  static Future<void> _generateAndSaveNewKeys() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      String? savedPub = prefs.getString('auto_generated_public_key2');
+      String? savedPriv = prefs.getString('auto_generated_private_key2');
+
+      if (savedPub == null || savedPriv == null) {
+        debugPrint("APP_CONFIG: Đang khởi tạo mã định danh duy nhất cho máy này (RSA 2048)...");
+        
+        // Tạo Key Pair 2048 bit
+        final keyGen = KeyGenerator('RSA');
+        keyGen.init(ParametersWithRandom(
+          RSAKeyGeneratorParameters(BigInt.parse('65537'), 2048, 12),
+          _getSecureRandom(),
+        ));
+
+        final pair = keyGen.generateKeyPair();
+        final myPublic = pair.publicKey as RSAPublicKey;
+        final myPrivate = pair.privateKey as RSAPrivateKey;
+
+        // Chuyển sang định dạng PEM
+        savedPub = _encodePublicKeyToPem(myPublic);
+        savedPriv = _encodePrivateKeyToPem(myPrivate);
+
+        // Lưu lại để dùng cho các lần sau
+        await prefs.setString('auto_generated_public_key2', savedPub);
+        await prefs.setString('auto_generated_private_key2', savedPriv);
+        
+        debugPrint("APP_CONFIG: Đã tạo xong mã định danh mới.");
+      }
+
+      rsaPublicKey = savedPub;
+      rsaPrivateKey = savedPriv;
+      
+    } catch (e, stack) {
+      debugPrint("GENERATE_KEY_ERROR: $e\n$stack");
+    }
+  }
+
+  static SecureRandom _getSecureRandom() {
+    final secureRandom = FortunaRandom();
+    final seed = List<int>.generate(32, (_) => Random.secure().nextInt(256));
+    secureRandom.seed(KeyParameter(Uint8List.fromList(seed)));
+    return secureRandom;
+  }
+
+  static String _encodePublicKeyToPem(RSAPublicKey publicKey) {
+    // encode to PKCS#1
+    final topLevel = ASN1Sequence();
+    topLevel.add(ASN1Integer(publicKey.modulus));
+    topLevel.add(ASN1Integer(publicKey.exponent));
+    final dataBase64 = base64.encode(topLevel.encode());
+    return "-----BEGIN RSA PUBLIC KEY-----\n$dataBase64\n-----END RSA PUBLIC KEY-----";
+  }
+
+  static String _encodePrivateKeyToPem(RSAPrivateKey privateKey) {
+    // encode to PKCS#1
+    final topLevel = ASN1Sequence();
+    topLevel.add(ASN1Integer(BigInt.from(0))); // version
+    topLevel.add(ASN1Integer(privateKey.modulus));
+    topLevel.add(ASN1Integer(privateKey.publicExponent));
+    topLevel.add(ASN1Integer(privateKey.privateExponent));
+    topLevel.add(ASN1Integer(privateKey.p));
+    topLevel.add(ASN1Integer(privateKey.q));
+    topLevel.add(ASN1Integer(privateKey.privateExponent! % (privateKey.p! - BigInt.from(1))));
+    topLevel.add(ASN1Integer(privateKey.privateExponent! % (privateKey.q! - BigInt.from(1))));
+    topLevel.add(ASN1Integer(privateKey.q!.modInverse(privateKey.p!)));
+    
+    final dataBase64 = base64.encode(topLevel.encode());
+    return "-----BEGIN RSA PRIVATE KEY-----\n$dataBase64\n-----END RSA PRIVATE KEY-----";
   }
 
   static Future<String> _findAndReadFile(String filename, List<String> dirs) async {

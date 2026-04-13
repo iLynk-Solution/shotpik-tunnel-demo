@@ -153,7 +153,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
         children: [
           TopBar(
             subtitle: "Quản lý danh sách thư mục được phép truy cập công khai",
-            title: "Whitelist folders",
+            title: "Danh sách trắng",
             child: Row(
               children: [
                 IconButton(
@@ -180,7 +180,7 @@ class _WhitelistPageState extends State<WhitelistPage> {
             ),
           Expanded(
             child: items.isEmpty && !_isLoading
-                ? const Center(child: Text("Whitelist trống."))
+                ? const Center(child: Text("Danh sách trắng trống."))
                 : ListView.separated(
                     itemCount: items.length,
                     separatorBuilder: (_, _) => const SizedBox(height: 12),

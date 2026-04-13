@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -7,75 +8,184 @@ import 'features/auth/presentation/pages/login_page.dart';
 
 import 'core/app_config.dart';
 
-void main() async {
-  try {
-    WidgetsFlutterBinding.ensureInitialized();
-    
-    // 1. Core window initialization
-    await windowManager.ensureInitialized();
-
-    // 2. Load Core Data (Keys & Auth-Session)
-    await AppConfig.loadFromFiles();
-    final authManager = AuthManager();
-    await authManager.loadSavedSession();
-
-    // 3. Setup Window Options
-    const windowOptions = WindowOptions(
-      size: Size(1200, 700),
-      center: true,
-      title: "Shotpik Agent",
-      skipTaskbar: false,
-    );
-
-    windowManager.waitUntilReadyToShow(windowOptions, () async {
-      await windowManager.show();
-      await windowManager.focus();
-      await windowManager.setMinimumSize(const Size(1200, 600));
-      await windowManager.setPreventClose(false);
-    });
-
-    // 4. Run the app
-    runApp(TunnelInternalApp(authManager: authManager));
-  } catch (e, stack) {
-    debugPrint("CRITICAL_ERROR: $e\n$stack");
-    // Even if error, try to run app to show something
-    runApp(MaterialApp(home: Scaffold(body: Center(child: Text("Fatal Error during startup: $e")))));
-  }
+void main() {
+  debugPrint("--- APP STARTING ---");
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const TunnelInternalApp());
 }
 
-class TunnelInternalApp extends StatelessWidget {
-  final AuthManager authManager;
+class TunnelInternalApp extends StatefulWidget {
+  const TunnelInternalApp({super.key});
 
-  const TunnelInternalApp({super.key, required this.authManager});
+  @override
+  State<TunnelInternalApp> createState() => _TunnelInternalAppState();
+}
+
+class _TunnelInternalAppState extends State<TunnelInternalApp> {
+  bool _isInitialized = false;
+  String? _initError;
+  AuthManager? _authManager;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    debugPrint("STEP: Starting initialization...");
+    try {
+      debugPrint("STEP: Initializing Window Manager...");
+      await windowManager.ensureInitialized();
+      
+      debugPrint("STEP: Loading App Config...");
+      await AppConfig.loadFromFiles();
+      
+      debugPrint("STEP: Initializing Auth Manager...");
+      final manager = AuthManager();
+      await manager.loadSavedSession();
+      
+      debugPrint("STEP: Auth Manager Ready.");
+      if (mounted) {
+        setState(() {
+          _authManager = manager;
+          _isInitialized = true;
+        });
+      }
+
+      // Khởi tạo các thành phần Native sau một độ trễ ngắn để đảm bảo UI đã render
+      Future.delayed(const Duration(milliseconds: 800), () async {
+        debugPrint("STEP: Secondary Native Init Starting...");
+        try {
+          const windowOptions = WindowOptions(
+            size: Size(1200, 700),
+            center: true,
+            title: "Shotpik Agent",
+          );
+
+          await windowManager.waitUntilReadyToShow(windowOptions, () async {
+            await windowManager.show();
+            await windowManager.focus();
+            debugPrint("STEP: Window Manager ReadyToShow.");
+          });
+
+          // Removed AppTrayManager as per user request
+          debugPrint("STEP: Tray Manager Skipped.");
+        } catch (e) {
+          debugPrint("NATIVE_INIT_ERROR: $e");
+        }
+      });
+    } catch (e, stack) {
+      debugPrint("CRITICAL_INITIALIZATION_ERROR: $e\n$stack");
+      if (mounted) {
+        setState(() {
+          _initError = "$e\n$stack";
+        });
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      title: "Shotpik Agent",
       theme: ThemeData(
         fontFamily: 'Geomanist',
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFFD93232),
-          brightness: Brightness.light,
         ).copyWith(
           primary: const Color(0xFFD93232),
-          onPrimary: Colors.white,
-          surface: Colors.white,
         ),
         scaffoldBackgroundColor: const Color(0xFFF8F9FD),
       ),
-      themeMode: ThemeMode.light,
-      home: ListenableBuilder(
-        listenable: authManager,
-        builder: (context, child) {
-          if (authManager.isAuthenticated) {
-            return TunnelHome(authManager: authManager);
-          } else {
-            return LoginPage(authManager: authManager);
-          }
-        },
-      ),
+      home: _buildHome(),
+    );
+  }
+
+  Widget _buildHome() {
+    if (_initError != null) {
+      return Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(40),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.error_outline, color: Colors.red, size: 80),
+                  const SizedBox(height: 24),
+                  const Text(
+                    "LỖI KHỞI ĐỘNG HỆ THỐNG", 
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black)
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.red.shade200),
+                    ),
+                    child: SelectableText(
+                      _initError!, 
+                      style: const TextStyle(fontFamily: 'Courier', fontSize: 13),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  ElevatedButton.icon(
+                    onPressed: () => exit(0),
+                    icon: const Icon(Icons.exit_to_app),
+                    label: const Text("Đóng ứng dụng"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    ),
+                  )
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (!_isInitialized || _authManager == null) {
+      return Scaffold(
+        backgroundColor: const Color(0xFFF8F9FD),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+               const CircularProgressIndicator(color: Color(0xFFD93232)),
+               const SizedBox(height: 24),
+               const Text(
+                 "Đang khởi động Shotpik Agent...", 
+                 style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFD93232))
+               ),
+               const SizedBox(height: 8),
+               Text(
+                 "Vui lòng đợi trong giây lát", 
+                 style: TextStyle(color: Colors.grey.shade600, fontSize: 13)
+               ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return ListenableBuilder(
+      listenable: _authManager!,
+      builder: (context, child) {
+        if (_authManager!.isAuthenticated) {
+          return TunnelHome(authManager: _authManager!);
+        } else {
+          return LoginPage(authManager: _authManager!);
+        }
+      },
     );
   }
 }

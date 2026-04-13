@@ -23,7 +23,7 @@ class TopBar extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                subtitle ?? "Welcome back,",
+                subtitle ?? "Chào mừng bạn trở lại,",
                 style: TextStyle(
                   fontSize: 14,
                   color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5),

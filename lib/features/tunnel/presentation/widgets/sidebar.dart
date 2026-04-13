@@ -50,25 +50,25 @@ class TunnelSidebar extends StatelessWidget {
               ],
             ),
           ),
-          _buildNavSection(context, "MENU"),
+          _buildNavSection(context, "DANH MỤC"),
           _buildNavItem(
             context,
             Icons.dashboard_rounded,
-            "Dashboard",
+            "Bảng điều khiển",
             selectedIndex == 0,
             onTap: () => onIndexChanged(0),
           ),
           _buildNavItem(
             context,
             Icons.security_rounded,
-            "Whitelist",
+            "Danh sách trắng",
             selectedIndex == 1,
             onTap: () => onIndexChanged(1),
           ),
           _buildNavItem(
             context,
             Icons.settings_outlined,
-            "Settings",
+            "Cài đặt",
             selectedIndex == 2,
             onTap: () => onIndexChanged(2),
           ),
@@ -137,10 +137,10 @@ class TunnelSidebar extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.03),
+            color: Colors.black.withValues(alpha: 0.09),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),

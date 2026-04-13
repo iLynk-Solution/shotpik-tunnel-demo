@@ -66,7 +66,7 @@ class _LoginPageState extends State<LoginPage> with WindowListener {
               ),
               const SizedBox(height: 8),
               Text(
-                "Please login to start your tunnel service",
+                "Vui lòng đăng nhập để bắt đầu dịch vụ tunnel",
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 14,
@@ -83,7 +83,7 @@ class _LoginPageState extends State<LoginPage> with WindowListener {
                   onPressed: () => _authManager.loginWeb(),
                   icon: const Icon(Icons.login_rounded),
                   label: const Text(
-                    "LOGIN WITH WEB",
+                    "ĐĂNG NHẬP QUA WEB",
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   style: ElevatedButton.styleFrom(
@@ -98,7 +98,7 @@ class _LoginPageState extends State<LoginPage> with WindowListener {
               ),
               const SizedBox(height: 20),
               Text(
-                "Secure Tunneling • File Sharing • Multi-Share",
+                "Kết nối bảo mật • Chia sẻ tệp • Đa nền tảng",
                 style: TextStyle(
                   fontSize: 10,
                   color: Theme.of(

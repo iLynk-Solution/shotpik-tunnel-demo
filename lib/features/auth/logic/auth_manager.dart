@@ -10,7 +10,7 @@ import 'package:http/http.dart' as http;
 class AuthManager extends ChangeNotifier {
   String? _authToken;
   Map<String, dynamic>? _userData;
-  final _appLinks = AppLinks();
+  late final _appLinks = AppLinks();
   StreamSubscription? _linkSubscription;
   Uri? _lastProcessedUri; // To prevent processing 'sticky' initial links
 

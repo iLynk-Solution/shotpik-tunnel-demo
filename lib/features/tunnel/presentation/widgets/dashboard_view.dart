@@ -56,7 +56,7 @@ class DashboardView extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               TopBar(
-                title: "Dashboard Overview",
+                title: "Tổng quan bảng điều khiển",
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
